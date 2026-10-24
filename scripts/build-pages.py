@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Publish only a reviewed file allowlist, never a working-tree tar archive."""
 import hashlib
+import gzip
 import io
 from pathlib import Path
 import re
@@ -23,7 +24,10 @@ def build(output, revision):
              name in ('docs/install-guide.txt', 'docs/upstream-LICENSE', 'README.md', 'LICENSE', 'NOTICE.md', 'SECURITY.md'))]
     if 'deploy/setup.py' not in names or 'deploy/compose.yaml' not in names:
         raise ValueError('Required source files missing from Git index')
-    with tarfile.open(bundle, 'w:gz', format=tarfile.PAX_FORMAT) as archive:
+    # A rerun for the same commit must keep the same bytes and digest, including
+    # the gzip header. Cached bootstrap scripts then remain usable.
+    with bundle.open('wb') as raw, gzip.GzipFile(filename='', fileobj=raw, mode='wb', mtime=0) as compressed, \
+            tarfile.open(fileobj=compressed, mode='w', format=tarfile.PAX_FORMAT) as archive:
         for name in sorted(names):
             path = ROOT / name
             if path.is_symlink() or not path.is_file():
