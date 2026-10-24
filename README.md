@@ -27,7 +27,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web
 sudo apt-get update && sudo apt-get install -y curl ca-certificates
 ```
 
-安装器会依次引导你完成外部配置、填写域名/团队/AUD/邮箱、验证 Access、
+安装器会依次引导你完成外部配置、填写域名/AUD/邮箱、自动识别团队并验证 Access、
 构建加固镜像、创建数据卷和服务。首次构建可能需要 10～30 分钟或更长。
 完成后显示访问网址、用户名 **`wechat`** 和独立生成的 **随机强密码**。
 在网页上先通过 Access，再输入本地账号密码，最后用手机微信扫码登录。
@@ -59,9 +59,11 @@ sudo bash deploy/install.sh
    使用相同域名，保护整个域名全部路径。创建 Allow 策略：
    Include → Emails → 填写明确的本人邮箱。不要使用 Everyone、整个邮箱后缀或 Bypass。
    根据需要设定 Access 会话时长，例如 24 小时，并配置适用的 MFA。
-5. **记录两个公开标识**：团队地址，例如 `https://my-team.cloudflareaccess.com`；
-   微信 Access 应用 Additional settings 中的 **Application Audience (AUD) Tag**。
-   安装器需要这两项进行源站独立验签，不能只凭域名推断。不要填写 API Token/JWT。
+5. **复制 AUD**：微信 Access 应用 Additional settings 中的
+   **Application Audience (AUD) Tag**，不要填写 API Token/JWT。
+   团队地址由安装器从该域名的 Access HTTPS 登录跳转自动识别，通常无需查找或输入。
+   如果域名尚未就绪、请求被拦截或跳转格式不受支持，才会提示手动填写团队名称或
+   团队地址，例如 `https://my-team.cloudflareaccess.com`。
 6. **路由源站保护**：返回 Tunnel 的该路由，在 Additional application settings →
    Access 开启 **Protect with Access**，关联相同的团队/应用。
    即使此项漏设，源站也会拒绝缺失/错误 JWT；仍建议同时启用。
@@ -69,7 +71,10 @@ sudo bash deploy/install.sh
    安装前登录后出现 502 可以是源站尚未启动；匿名请求必须先被拦截。
    安装器会检查 `/`、`/files/`、`/websockets` 的拦截和团队公钥。
 
-脚本随后询问完整域名、团队名称、AUD、允许登录的邮箱和数据卷大小。
+脚本询问完整域名、AUD、允许登录的邮箱和数据卷大小；Tunnel/Access 配置完成后
+自动识别团队，并显示识别出的地址。只接受标准的 `https://<团队>.cloudflareaccess.com`
+Access 登录跳转，不跟随任意重定向。识别后仍需通过全部路径拦截和团队公钥检查；
+手动备用输入也不能跳过这些验证。团队地址保存到本机配置后，续装和日常检查不会自动更换它。
 **源站邮箱白名单与 Access 策略同时生效**：意外放宽云端策略也不能让不在名单内的邮箱进入应用。
 匿名探测只能验证登录拦截，无法枚举云端全部策略或证明填写的 AUD 正确；
 最终需要第一次实际登录确认。

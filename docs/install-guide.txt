@@ -24,7 +24,8 @@
    设置合适的 Access Session duration（例如 24 小时），启用适用的 MFA。
 
 5. 复制 Application Audience (AUD) Tag（通常在 Additional settings）。
-   在团队设置中找到团队地址 https://my-team.cloudflareaccess.com。
+   团队地址会从域名的 Access HTTPS 登录跳转自动识别，正常无需查找或输入。
+   识别失败时，可从团队设置中找到 https://my-team.cloudflareaccess.com 作为备用。
    回到第 3 步，在该路由的 Additional application settings → Access 中
    启用 Protect with Access，选择同一个团队/应用；界面名称可能变化。
    源站也会独立校验 JWT 签名、issuer、AUD 和邮箱，拒绝缺失或错误身份。
@@ -32,7 +33,8 @@
 6. 无痕窗口打开域名，应先显示 Cloudflare Access 登录。应用还未启动时，
    登录后的 502 属于准备阶段现象；匿名请求必须先被 Access 拦截。
 
-本机仅收集：应用域名、团队名称、AUD、明确的邮箱名单和数据卷大小。
+本机仅收集：应用域名、AUD、明确的邮箱名单和数据卷大小；团队名称自动识别。
+识别失败时提供手动输入，随后仍必须验证 Access 拦截和团队公钥。
 域名/AUD 不是认证密码。无需提供 Cloudflare API Token 或 GitHub 密钥。
 新连接器使用的 Tunnel Token 为敏感凭证，隐藏输入，仅保存在 root 私有文件。
 安装器不会关闭现有公网 SSH；若要关闭，请先验证 SSH Tunnel 并在云控制台操作。

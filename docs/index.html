@@ -15,6 +15,6 @@
 <p>向导会说明域名、Tunnel、Access 的配置，验证登录拦截后再部署，完成时提供用户名和随机密码。首次构建需要一些时间。</p>
 <a href="install.sh">先检查安装引导脚本</a> · <a href="SHA256SUMS">安装包摘要</a> · <a href="version.txt">发布版本</a></section>
 <div class="grid"><div><strong>双重验证</strong><p>Access 邮箱登录 + 源站验签与邮箱名单 + 本地随机密码。</p></div><div><strong>隔离运行</strong><p>用户映射、最小权限、私网与云元数据阻断、资源上限。</p></div><div><strong>手机可用</strong><p>中文输入、自动尺寸、可拖动工具栏、照片与文件上传。</p></div></div>
-<section class="card"><h2>先准备三件事</h2><ol><li>Cloudflare 托管域名，选择专用子域名。</li><li>Tunnel 路由指向本服务器的 <code>http://localhost:13000</code>。</li><li>Access 保护完整域名，仅允许明确邮箱，准备团队名称和 AUD。</li></ol><p>已有 SSH Tunnel 可以复用。全部凭证在你自己的服务器保存，此页面没有凭证输入框，也不会收集安装配置。</p></section>
+<section class="card"><h2>先准备三件事</h2><ol><li>Cloudflare 托管域名，选择专用子域名。</li><li>Tunnel 路由指向本服务器的 <code>http://localhost:13000</code>。</li><li>Access 保护完整域名，仅允许明确邮箱，复制 AUD；团队地址由安装器自动识别。</li></ol><p>自动识别失败时会提示手动填写团队地址，填写后仍需验证 Access 和公钥。已有 SSH Tunnel 可以复用。全部凭证在你自己的服务器保存，此页面没有凭证输入框，也不会收集安装配置。</p></section>
 <footer>原始项目：<a href="https://github.com/nickrunning/wechat-selkies">nickrunning/wechat-selkies</a>。安全加固不能消除所有风险，仍需维护宿主机内核、账号和设备。<a href="https://github.com/jiojiojackson/wechat-web/blob/main/SECURITY.md">安全边界与说明</a></footer>
 </main></body></html>

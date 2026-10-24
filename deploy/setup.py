@@ -112,22 +112,63 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def edge_response(opener, domain, path='/'):
+    request = urllib.request.Request('https://' + domain + path,
+                                     headers={'User-Agent': 'wechat-web-preflight/1.0'})
+    try:
+        return opener.open(request, timeout=20)
+    except urllib.error.HTTPError as error:
+        return error
+
+
+def access_login_team(response):
+    """Extract a team from a standard Access login redirect without following it."""
+    location = response.headers.get('Location', '')
+    if len(location) > 16384 or re.search(r'[\x00-\x20\x7f]', location):
+        fail('Access 登录跳转格式无效。')
+    try:
+        target = urllib.parse.urlsplit(location)
+        match = re.fullmatch(r'([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.cloudflareaccess\.com',
+                             target.hostname or '')
+        valid = (response.status in (302, 303) and target.scheme == 'https' and match
+                 and target.username is None and target.password is None
+                 and target.port in (None, 443)
+                 and (target.path == '/cdn-cgi/access/login'
+                      or target.path.startswith('/cdn-cgi/access/login/')))
+    except ValueError:
+        valid = False
+    if not valid:
+        fail('未收到标准 Cloudflare Access HTTPS 登录跳转。')
+    return match[1]
+
+
+def resolve_access_team(domain):
+    """Bootstrap from the user's HTTPS hostname; runtime issuer stays pinned."""
+    domain = hostname(domain)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with edge_response(opener, domain) as response:
+            team = access_login_team(response)
+    except (RuntimeError, OSError, ValueError):
+        print('无法从域名的 Access 登录跳转自动识别团队。请检查域名和 Access 配置，或手动填写。')
+        # Do not print Location, response bodies, or network exception details.
+        # Manual input still goes through the same Access/JWKS checks below.
+        return team_name(ask('Zero Trust 团队名称 / 团队地址（自动识别失败时备用）'))
+    print(f'已自动识别团队地址：https://{team}.cloudflareaccess.com；接下来验证 Access 与公钥。')
+    return team
+
+
 def verify_edge(config):
     """Unauthenticated probes must hit this team's Access gate before deploy."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     for path in ('/', '/files/', '/websockets'):
-        request = urllib.request.Request('https://' + config['domain'] + path,
-                                         headers={'User-Agent': 'wechat-web-preflight/1.0'})
         try:
-            response = opener.open(request, timeout=20)
-        except urllib.error.HTTPError as error:
-            response = error
-        with response:
-            target = urllib.parse.urlsplit(response.headers.get('Location', ''))
-            if (response.status not in (302, 303) or target.scheme != 'https'
-                    or target.hostname != config['team'] + '.cloudflareaccess.com'
-                    or not target.path.startswith('/cdn-cgi/access/login')):
-                fail(f'Access 拦截验证失败：{path} 返回 {response.status}。检查域名、团队、应用覆盖路径和 Bypass 策略。')
+            with edge_response(opener, config['domain'], path) as response:
+                team = access_login_team(response)
+        except RuntimeError:
+            fail(f'Access 拦截验证失败：{path}。检查域名、团队、应用覆盖路径和 Bypass 策略。')
+        if team != config['team']:
+            fail(f'Access 团队不一致：{path}。不会自动替换已记录的团队。')
     url = f"https://{config['team']}.cloudflareaccess.com/cdn-cgi/access/certs"
     with opener.open(url, timeout=20) as response:
         raw = response.read(262145)
@@ -352,10 +393,9 @@ def install():
     else:
         preflight()
         print((SOURCE.parent / 'docs/install-guide.txt').read_text())
-        config = validate_config(dict(domain=ask('已配置的微信完整域名'),
-                                      team=ask('Zero Trust 团队名称 / 团队地址'),
-                                      aud=ask('微信 Access 应用的 Application Audience (AUD)'),
-                                      emails=ask('允许登录的完整邮箱（多个用英文逗号分隔）')))
+        config = dict(domain=hostname(ask('已配置的微信完整域名')),
+                      aud=audience(ask('微信 Access 应用的 Application Audience (AUD)')),
+                      emails=email_list(ask('允许登录的完整邮箱（多个用英文逗号分隔）')))
         storage = ask('为微信数据分配多少 GiB（固定上限，预分配）', '16')
         if not storage.isdigit() or not 4 <= int(storage) <= 256:
             fail('存储大小应为 4～256 的整数。')
@@ -370,6 +410,9 @@ def install():
     run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'gnupg')
     setup_tunnel()
     ask('确认域名/Tunnel/Access 已配置完成后按回车，开始验证')
+    if 'team' not in config:
+        config['team'] = resolve_access_team(config['domain'])
+    config = validate_config(config)
     verify_edge(config)
     if not STATE.exists():
         ROOT.mkdir(mode=0o700)
