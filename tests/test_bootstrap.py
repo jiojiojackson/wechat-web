@@ -2,6 +2,7 @@
 import hashlib
 import io
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -12,6 +13,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_missing_python_and_curl_are_installed_before_use(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bindir = root/'bin'
+            bindir.mkdir()
+            for name in ('env','chmod','mktemp','sha256sum','ip'):
+                (bindir/name).symlink_to(shutil.which(name))
+            sudo = bindir/'sudo'
+            sudo.write_text('#!/bin/bash\nexec "$@"\n')
+            sudo.chmod(0o700)
+            apt = bindir/'apt-get'
+            apt.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$APT_RECORD"\n'
+                           'if [[ $1 == install ]]; then\n'
+                           ' /usr/bin/ln -sf "$PYTHON_BINARY" "$FIXTURE_BIN/python3"\n'
+                           ' /usr/bin/ln -sf "$CURL_BINARY" "$FIXTURE_BIN/curl"\nfi\n')
+            apt.chmod(0o700)
+            env = dict(os.environ, PATH=str(bindir), APT_RECORD=str(root/'apt.log'),
+                       FIXTURE_BIN=str(bindir), PYTHON_BINARY=shutil.which('python3'), CURL_BINARY=shutil.which('curl'))
+            result = subprocess.run(['/bin/bash','-c','source "$1"; bootstrap_dependencies; command -v python3; command -v curl',
+                                     '--',str(ROOT/'deploy/bootstrap.sh')],env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            record=(root/'apt.log').read_text()
+            self.assertIn('python3',record)
+            self.assertIn('curl',record)
+            self.assertTrue((bindir/'python3').exists())
+            self.assertTrue((bindir/'curl').exists())
+
     def exercise(self, extra=None, corrupt=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -30,7 +58,8 @@ class BootstrapTests(unittest.TestCase):
                         entry.size = 4
                         tar.addfile(entry, io.BytesIO(b'evil'))
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            template = (ROOT/'install.sh').read_text().replace('@@RELEASE@@', 'a'*40)
+            template = ((ROOT/'install.sh').read_text().replace('@@RELEASE@@', 'a'*40)
+                        .replace('@@BOOTSTRAP@@', (ROOT/'deploy/bootstrap.sh').read_text()))
             script = root/'bootstrap.sh'
             script.write_text(template.replace('@@BUNDLE_SHA256@@', '0'*64 if corrupt else digest))
             bindir = root/'bin'

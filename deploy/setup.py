@@ -7,6 +7,7 @@ the checkout. No Cloudflare account API key or GitHub credential is requested.
 import argparse
 import fcntl
 import getpass
+import warnings
 import hashlib
 import ipaddress
 import json
@@ -29,6 +30,7 @@ SOURCE = Path(__file__).resolve().parent
 STATE = ROOT / 'install-state.json'
 DOCKER_KEY = '9DC858229FC7DD38854AE2D88D81803C0EBFCD88'
 CF_KEY_SHA256 = '1bd95f4082b320d541bee351560fc2765aa9f9cd8efa4c9e32135e63f252721d'
+IMAGE_REPOSITORY = 'jiojiojackson/web-wechat'
 
 
 def fail(message):
@@ -56,13 +58,113 @@ def write(path, content, mode=0o600):
 
 def ask(prompt, default=None):
     suffix = f' [{default}]' if default is not None else ''
-    with open('/dev/tty', 'r+') as tty:
-        tty.write(prompt + suffix + ': ')
-        tty.flush()
-        line = tty.readline()
+    try:
+        # Buffered r+ requires seeking on a character device on some Python
+        # versions. Separate handles work with SSH, sudo and piped stdin.
+        with open('/dev/tty', 'w', encoding='utf-8') as output:
+            output.write(prompt + suffix + ': ')
+            output.flush()
+        with open('/dev/tty', 'r', encoding='utf-8') as incoming:
+            line = incoming.readline()
+    except OSError:
+        fail('无法读取交互终端。请使用 SSH 交互会话（远程命令请加 ssh -t）后重试。')
     if not line:
         fail('未读取到终端输入。请在 SSH 交互终端中运行安装器。')
     return line.strip() or default or ''
+
+
+def ask_secret(prompt):
+    try:
+        with open('/dev/tty', 'w', encoding='utf-8') as output, warnings.catch_warnings():
+            warnings.simplefilter('error', getpass.GetPassWarning)
+            return getpass.getpass(prompt + ': ', stream=output).strip()
+    except (OSError, getpass.GetPassWarning):
+        fail('无法安全隐藏输入。请在 SSH 交互终端中重试，Token 不会通过明文备用输入读取。')
+
+
+def prompt_value(prompt, validator, default=None):
+    while True:
+        try:
+            return validator(ask(prompt, default))
+        except RuntimeError as error:
+            print(f'输入无效：{error} 请重新填写。')
+
+
+def ready(prompt):
+    while True:
+        answer = ask(prompt + '（完成后回车；输入 q 退出）')
+        if answer.lower() == 'q':
+            fail('用户取消安装。')
+        if not answer or answer.lower() in ('y', 'yes', 'ok'):
+            return
+        print('请完成本步后按回车，或输入 q 退出。')
+
+
+def storage_size(value):
+    if not value.isdigit() or not 4 <= int(value) <= 256:
+        fail('存储大小应为 4～256 GiB 的整数。')
+    return int(value)
+
+
+def yes_no(value):
+    if value.lower() not in ('y', 'yes', 'n', 'no'):
+        fail('请输入 y 或 n。')
+    return value.lower() in ('y', 'yes')
+
+
+def wizard(info, memory):
+    print('\n[1/6] 服务器检查通过')
+    print(f'Ubuntu {info.get("VERSION_ID", "")} · {memory/1024**3:.1f} GiB；将使用 Docker Hub 成品镜像。')
+    configured = prompt_value('Cloudflare 的域名、Tunnel 和 Access 是否已配置？y 已配置，n 需要引导', yes_no, 'y')
+    print('\n[2/6] 域名与访问身份')
+    print('请准备已接入 Cloudflare DNS 的专用子域名。无需开放公网应用端口。')
+    domain = prompt_value('微信完整域名，例如 wechat.example.com', hostname)
+    emails = prompt_value('Access 允许登录的本人邮箱（多个用逗号分隔）', email_list)
+    print('\n[3/6] Cloudflare Tunnel')
+    setup_tunnel()
+    if not configured:
+        print(f'请在该 Tunnel 添加 Published application route：\n  域名：{domain}\n  类型：HTTP\n  服务：localhost:13000')
+        print('已有 SSH 路由保留不变。')
+        ready('该微信路由已保存')
+    else:
+        print('复用已有微信路由，接下来自动验证；源站应为 HTTP localhost:13000。')
+    print('\n[4/6] Cloudflare Access')
+    if not configured:
+        print(f'Access → Applications → Self-hosted：域名 {domain}，覆盖全部路径。')
+        print(f'Allow → Emails 仅允许：{emails}；不要添加 Bypass / Everyone。')
+        print('在 Tunnel 的该路由启用 Protect with Access，并关联同一个应用。')
+    print('从该 Access 应用 Additional settings 复制 Application Audience (AUD) Tag。')
+    aud = prompt_value('粘贴微信应用的 AUD Tag', audience)
+    config = dict(domain=domain, emails=emails, aud=aud)
+    verify_connection(config)
+    print('\n[5/6] 数据空间与确认')
+    config['storage_gib'] = prompt_value('微信数据卷大小（GiB）', storage_size, '16')
+    print(f'访问 https://{domain}；数据 /var/lib/wechat-web；最多占用 {config["storage_gib"]} GiB。')
+    print('软件依赖缺失时自动安装；只拉取镜像，不在目标服务器编译。')
+    if ask('确认部署？y 继续，n 退出', 'y').lower() not in ('y', 'yes'):
+        fail('用户取消安装。')
+    return config
+
+
+def verify_connection(config):
+    while True:
+        try:
+            if 'team' not in config:
+                config['team'] = resolve_access_team(config['domain'])
+            verified = validate_config(config)
+            verify_edge(verified)
+            config.update(verified)
+            print('Access 拦截与团队公钥检查通过。')
+            return
+        except (RuntimeError, OSError, ValueError):
+            print('Access 验证未通过，请核对域名、Tunnel 路由和 Access 应用。')
+            answer = ask('回车重新检查；输入 edit 修改域名/AUD；输入 q 退出')
+            if answer.lower() == 'q':
+                fail('用户取消安装。')
+            if answer.lower() == 'edit':
+                config['domain'] = prompt_value('微信完整域名', hostname)
+                config['aud'] = prompt_value('微信应用 AUD Tag', audience)
+                config.pop('team', None)
 
 
 def hostname(value):
@@ -235,28 +337,48 @@ def preflight():
                 fail('172.30.81.0/24 与已有路由重叠，请使用独立服务器或手动调整安装器配置。')
 
 
+def ensure_packages(packages):
+    missing = []
+    for package in packages:
+        result = subprocess.run(['dpkg-query', '-W', '-f=${db:Status-Status}', package],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if result.returncode or result.stdout.strip() != 'installed':
+            missing.append(package)
+    if missing:
+        print('自动安装缺失依赖：' + ', '.join(missing))
+        run('apt-get', 'update', '-qq')
+        run('apt-get', 'install', '-y', '--no-install-recommends', *missing)
+
+
+def docker_repository(info):
+    Path('/etc/apt/keyrings').mkdir(mode=0o755, parents=True, exist_ok=True)
+    key = '/etc/apt/keyrings/wechat-web-docker.asc'
+    run('curl', '--proto', '=https', '--tlsv1.2', '-fsSL', '--retry', '3', '-o', key,
+        'https://download.docker.com/linux/ubuntu/gpg')
+    os.chmod(key, 0o644)
+    details = run('gpg', '--batch', '--with-colons', '--show-keys', key, capture=True)
+    if DOCKER_KEY not in [line.split(':')[9] for line in details.splitlines() if line.startswith('fpr:')]:
+        fail('Docker 官方签名密钥指纹不匹配。')
+    arch = run('dpkg', '--print-architecture', capture=True)
+    write('/etc/apt/sources.list.d/wechat-web-docker.list',
+          f'deb [arch={arch} signed-by={key}] https://download.docker.com/linux/ubuntu {info["VERSION_CODENAME"]} stable\n', 0o644)
+
+
 def dependencies(info):
-    run('apt-get', 'update', '-qq')
-    run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl',
-        'gnupg', 'iptables', 'e2fsprogs', 'util-linux', 'apparmor', 'unattended-upgrades')
+    ensure_packages(['ca-certificates', 'curl', 'gnupg', 'iproute2', 'iptables',
+                     'e2fsprogs', 'util-linux', 'apparmor', 'unattended-upgrades'])
     run('systemctl', 'enable', '--now', 'apparmor')
     if not Path('/sys/module/apparmor/parameters/enabled').exists() or Path('/sys/module/apparmor/parameters/enabled').read_text().strip() != 'Y':
         fail('内核未启用 AppArmor，停止部署。请先启用并重启主机。')
     if not shutil.which('docker'):
-        Path('/etc/apt/keyrings').mkdir(mode=0o755, parents=True, exist_ok=True)
-        key = '/etc/apt/keyrings/wechat-web-docker.asc'
-        run('curl', '--proto', '=https', '--tlsv1.2', '-fsSL', '--retry', '3', '-o', key,
-            'https://download.docker.com/linux/ubuntu/gpg')
-        os.chmod(key, 0o644)
-        details = run('gpg', '--batch', '--with-colons', '--show-keys', key, capture=True)
-        if DOCKER_KEY not in [line.split(':')[9] for line in details.splitlines() if line.startswith('fpr:')]:
-            fail('Docker 官方签名密钥指纹不匹配。')
-        arch = run('dpkg', '--print-architecture', capture=True)
-        write('/etc/apt/sources.list.d/wechat-web-docker.list',
-              f'deb [arch={arch} signed-by={key}] https://download.docker.com/linux/ubuntu {info["VERSION_CODENAME"]} stable\n', 0o644)
+        docker_repository(info)
         run('apt-get', 'update', '-qq')
         run('apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io',
             'docker-buildx-plugin', 'docker-compose-plugin')
+    elif subprocess.run(['docker', 'compose', 'version'], stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL).returncode:
+        docker_repository(info)
+        ensure_packages(['docker-compose-plugin'])
     daemon = Path('/etc/docker/daemon.json')
     config = json.loads(daemon.read_text()) if daemon.exists() else {}
     changed = config.get('userns-remap') != 'default'
@@ -282,11 +404,15 @@ def setup_tunnel():
     if active:
         print('检测到现有 Cloudflare Tunnel 服务，将复用，不更改其配置。')
         return
-    if ask('未检测到活动的 Tunnel。由安装器安装连接器？输入 INSTALL，或先手动启动后重试') != 'INSTALL':
-        fail('请先建立 Tunnel；没有更改应用配置。')
-    token = getpass.getpass('粘贴该 Tunnel 的连接器 Token（隐藏输入，不是 Cloudflare API Token）: ')
-    if not re.fullmatch(r'[A-Za-z0-9_+/=-]{80,4096}', token):
-        fail('Tunnel Token 格式无效。只粘贴 Token，不要粘贴整条安装命令。')
+    print('本机没有已运行的 Tunnel。请在 Cloudflare → Networks → Connectors 创建或选择一个 Tunnel。')
+    if ask('由脚本安装 cloudflared 连接器？y 安装，n 退出', 'y').lower() not in ('y', 'yes'):
+        fail('请先手动启动本机 Tunnel，再重新运行安装器。')
+    ensure_packages(['ca-certificates', 'curl', 'gnupg'])
+    while True:
+        token = ask_secret('粘贴该 Tunnel 的连接器 Token（隐藏输入，只粘贴 Token 部分）')
+        if re.fullmatch(r'[A-Za-z0-9_+/=-]{80,4096}', token):
+            break
+        print('Token 格式无效，请重新粘贴；不要粘贴整条安装命令。')
     # Never put the connector token in argv, environment, journald, or Git.
     if not shutil.which('cloudflared'):
         key = Path('/usr/share/keyrings/wechat-web-cloudflare.gpg')
@@ -316,6 +442,23 @@ def setup_tunnel():
     print('连接器已启动。请确认 Cloudflare 中 Tunnel 显示 Healthy。')
 
 
+def pull_image():
+    metadata = SOURCE / 'release.json'
+    reference = json.loads(metadata.read_text())['image'] if metadata.exists() else IMAGE_REPOSITORY + ':latest'
+    pattern = r'(?:docker\.io/)?jiojiojackson/web-wechat(?:@sha256:[0-9a-f]{64}|:latest|:sha-[0-9a-f]{40})'
+    if not re.fullmatch(pattern, reference):
+        fail('发布镜像地址无效，只允许该项目的 Docker Hub 镜像。')
+    print('正在从 Docker Hub 拉取已构建的镜像，无需本机编译。')
+    run('docker', 'pull', reference)
+    digests = json.loads(run('docker', 'image', 'inspect', reference, '--format', '{{json .RepoDigests}}', capture=True))
+    for digest in digests or []:
+        if re.fullmatch(r'(?:docker\.io/)?jiojiojackson/web-wechat@sha256:[0-9a-f]{64}', digest):
+            if '@sha256:' in reference and digest.split('@', 1)[1] != reference.split('@', 1)[1]:
+                continue
+            return digest
+    fail('未能确认拉取镜像的仓库摘要，拒绝使用未固定版本的镜像。')
+
+
 def subid(path):
     entries = [line.split(':') for line in Path(path).read_text().splitlines() if line.startswith('dockremap:')]
     if len(entries) != 1 or int(entries[0][2]) < 65536:
@@ -331,7 +474,7 @@ def create_volume(config):
     if not image.exists():
         needed = config['storage_gib'] * 1024**3
         if shutil.disk_usage(DATA).free < needed + 10 * 1024**3:
-            fail('数据卷之外需要至少 10 GiB 剩余空间用于构建；请释放磁盘后重试。')
+            fail('数据卷之外需要至少 10 GiB 剩余空间用于镜像与系统缓存；请释放磁盘后重试。')
         run('fallocate', '-l', str(needed), image)
         image.chmod(0o600)
         run('mkfs.ext4', '-q', '-F', image)
@@ -392,28 +535,12 @@ def install():
         print('继续尚未完成的安装；保留原域名、密码和数据。')
     else:
         preflight()
-        print((SOURCE.parent / 'docs/install-guide.txt').read_text())
-        config = dict(domain=hostname(ask('已配置的微信完整域名')),
-                      aud=audience(ask('微信 Access 应用的 Application Audience (AUD)')),
-                      emails=email_list(ask('允许登录的完整邮箱（多个用英文逗号分隔）')))
-        storage = ask('为微信数据分配多少 GiB（固定上限，预分配）', '16')
-        if not storage.isdigit() or not 4 <= int(storage) <= 256:
-            fail('存储大小应为 4～256 的整数。')
-        config.update(storage_gib=int(storage), memory=f'{min(6, max(2, int(memory/1024**3)-2))}g',
+        config = wizard(info, memory)
+        config.update(memory=f'{min(6, max(2, int(memory/1024**3)-2))}g',
                       cpus=min(3, max(1, (os.cpu_count() or 2)-1)), complete=False)
-        print('即将安装至 /opt/wechat-web；数据 /var/lib/wechat-web；入口仅 127.0.0.1:13000。')
-        if ask('确认仅用于独立主机，Access 已按上述邮箱配置且无 Bypass，并允许安装依赖？输入 DEPLOY') != 'DEPLOY':
-            fail('已取消，未修改应用或 Docker。')
-    # Tunnel can be installed/reused before the edge check. Never start the app
-    # until an unauthenticated request is blocked by the selected Access team.
-    run('apt-get', 'update', '-qq')
-    run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'gnupg')
-    setup_tunnel()
-    ask('确认域名/Tunnel/Access 已配置完成后按回车，开始验证')
-    if 'team' not in config:
-        config['team'] = resolve_access_team(config['domain'])
-    config = validate_config(config)
-    verify_edge(config)
+    if STATE.exists():
+        verify_connection(config)
+    print('\n[6/6] 安装依赖、拉取镜像并启动 Docker Compose')
     if not STATE.exists():
         ROOT.mkdir(mode=0o700)
         write(STATE, json.dumps(config, indent=2) + '\n')
@@ -425,13 +552,11 @@ def install():
             shutil.copytree(SOURCE.parent / directory, ROOT / 'source' / directory,
                             dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     dependencies(info)
+    image_reference = pull_image()
     uid, gid = create_volume(config)
     create_secrets(uid, gid)
-    image_tag = 'wechat-web:local'
-    run('docker', 'build', '--pull', '-t', image_tag, SOURCE)
-    image_id = run('docker', 'image', 'inspect', image_tag, '--format', '{{.Id}}', capture=True)
-    config['image'] = image_id
-    env = dict(WECHAT_IMAGE=image_id, WECHAT_DOMAIN=config['domain'], WECHAT_ACCESS_TEAM=config['team'],
+    config['image'] = image_reference
+    env = dict(WECHAT_IMAGE=image_reference, WECHAT_DOMAIN=config['domain'], WECHAT_ACCESS_TEAM=config['team'],
                WECHAT_ACCESS_AUD=config['aud'], WECHAT_ALLOWED_EMAILS=config['emails'],
                WECHAT_MEMORY=config['memory'], WECHAT_CPUS=str(config['cpus']))
     write(ROOT / '.env', ''.join(f'{k}={v}\n' for k, v in env.items()))

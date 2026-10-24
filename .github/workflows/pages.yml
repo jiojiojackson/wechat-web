@@ -1,4 +1,4 @@
-name: Test and publish installer
+name: Test, publish Docker Hub image and installer
 on:
   push:
     branches: [main]
@@ -6,6 +6,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  IMAGE_REPOSITORY: jiojiojackson/web-wechat
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: false
@@ -29,12 +31,17 @@ jobs:
           /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_installer.py -v
           /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_bootstrap.py -v
           /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_package.py -v
+          /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_terminal.py -v
   containers:
     needs: test
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -42,12 +49,44 @@ jobs:
         with:
           persist-credentials: false
       - name: Build hardened native image
-        run: docker build --pull -t wechat-web:ci deploy
+        run: docker build --pull --label org.opencontainers.image.source=https://github.com/jiojiojackson/wechat-web --label org.opencontainers.image.revision=${{ github.sha }} -t wechat-web:ci deploy
       - name: Run isolated authentication and gateway tests
         run: python3 scripts/test-container.py --image wechat-web:ci
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Push tested native image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker tag wechat-web:ci "$IMAGE_REPOSITORY:sha-$GITHUB_SHA-${{ matrix.arch }}"
+          docker push "$IMAGE_REPOSITORY:sha-$GITHUB_SHA-${{ matrix.arch }}"
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: containers
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.manifest.outputs.image }}
+    steps:
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Publish multi-platform image
+        id: manifest
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE_REPOSITORY:sha-$GITHUB_SHA" -t "$IMAGE_REPOSITORY:latest" \
+            "$IMAGE_REPOSITORY:sha-$GITHUB_SHA-amd64" "$IMAGE_REPOSITORY:sha-$GITHUB_SHA-arm64"
+          digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE_REPOSITORY:sha-$GITHUB_SHA")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=$IMAGE_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
   build:
     if: github.event_name != 'pull_request'
-    needs: [test, containers]
+    needs: [test, publish]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -59,6 +98,8 @@ jobs:
           fetch-depth: 2
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - run: python3 scripts/build-pages.py _site
+        env:
+          WECHAT_RELEASE_IMAGE: ${{ needs.publish.outputs.image }}
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: _site

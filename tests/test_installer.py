@@ -177,7 +177,7 @@ class PersistenceTests(unittest.TestCase):
             with patch.multiple(installer, ROOT=root, STATE=state), \
                  patch.object(installer, 'platform_check', return_value=({}, 8*1024**3)), \
                  patch.object(installer, 'run') as run, \
-                 patch.object(installer, 'setup_tunnel'), patch.object(installer, 'ask'), \
+                 patch.object(installer, 'setup_tunnel'), patch.object(installer, 'ask', return_value='q'), \
                  patch.object(installer, 'resolve_access_team') as resolve, \
                  patch.object(installer, 'verify_edge', side_effect=RuntimeError('no access gate')), \
                  patch.object(installer, 'dependencies') as dependencies, \
@@ -189,31 +189,51 @@ class PersistenceTests(unittest.TestCase):
                 resolve.assert_not_called()
                 self.assertFalse(any(call.args[:2] == ('docker', 'build') for call in run.call_args_list))
 
-    def test_fresh_install_resolves_team_after_tunnel_and_before_verification(self):
+    def test_wizard_resolves_team_after_tunnel_and_never_builds(self):
+        order = []
+        def detect(domain):
+            self.assertEqual(domain, CONFIG['domain'])
+            self.assertEqual(order, ['tunnel'])
+            order.append('discovery')
+            return 'test-team'
+        with patch.object(installer, 'ask', side_effect=['n', 'wechat.example.com', 'owner@example.com', '', 'a'*64, '16', 'y']), \
+             patch.object(installer, 'setup_tunnel', side_effect=lambda: order.append('tunnel')), \
+             patch.object(installer, 'resolve_access_team', side_effect=detect), \
+             patch.object(installer, 'verify_edge') as verify, patch.object(installer, 'run') as run:
+            config = installer.wizard({'VERSION_ID': '24.04'}, 8*1024**3)
+        self.assertEqual(config['team'], 'test-team')
+        self.assertEqual(config['aud'], CONFIG['aud'])
+        self.assertEqual(config['storage_gib'], 16)
+        self.assertEqual(order, ['tunnel', 'discovery'])
+        verify.assert_called_once()
+        run.assert_not_called()
+
+    def test_pulls_public_image_and_pins_repository_digest(self):
+        reference = 'jiojiojackson/web-wechat@sha256:'+'a'*64
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)/'runtime'
-            order = []
-            def detect(domain):
-                self.assertEqual(domain, CONFIG['domain'])
-                self.assertEqual(order, ['tunnel'])
-                order.append('discovery')
-                return 'test-team'
-            with patch.multiple(installer, ROOT=root, STATE=root/'install-state.json'), \
-                 patch.object(installer, 'platform_check', return_value=({}, 8*1024**3)), \
-                 patch.object(installer, 'preflight'), patch.object(installer, 'run'), \
-                 patch.object(installer, 'ask', side_effect=['wechat.example.com', 'a'*64, 'owner@example.com', '16', 'DEPLOY', '']) as ask, \
-                 patch.object(installer, 'setup_tunnel', side_effect=lambda: order.append('tunnel')), \
-                 patch.object(installer, 'resolve_access_team', side_effect=detect), \
-                 patch.object(installer, 'verify_edge', side_effect=RuntimeError('test gate stops deployment')) as verify, \
-                 patch.object(installer, 'dependencies') as dependencies:
-                with self.assertRaises(RuntimeError):
-                    installer.install()
-                self.assertEqual(order, ['tunnel', 'discovery'])
-                self.assertEqual(ask.call_count, 6)
-                self.assertEqual(verify.call_args.args[0]['team'], 'test-team')
-                self.assertEqual(verify.call_args.args[0]['aud'], CONFIG['aud'])
-                dependencies.assert_not_called()
-                self.assertFalse(root.exists())
+            root = Path(directory)
+            (root/'release.json').write_text(json.dumps({'image': reference}))
+            with patch.object(installer, 'SOURCE', root), \
+                 patch.object(installer, 'run', side_effect=['', json.dumps([reference])]) as run:
+                self.assertEqual(installer.pull_image(), reference)
+                self.assertEqual(run.call_args_list[0].args, ('docker', 'pull', reference))
+                self.assertFalse(any(call.args[:2] == ('docker', 'build') for call in run.call_args_list))
+
+    def test_foreign_release_image_rejected_before_pull(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'release.json').write_text(json.dumps({'image':'untrusted.example/app:latest'}))
+            with patch.object(installer,'SOURCE',root), patch.object(installer,'run') as run:
+                with self.assertRaises(RuntimeError):installer.pull_image()
+                run.assert_not_called()
+
+    def test_installs_only_missing_packages(self):
+        installed = MagicMock(returncode=0, stdout='installed')
+        missing = MagicMock(returncode=1, stdout='')
+        with patch.object(installer.subprocess,'run',side_effect=[installed,missing]), \
+             patch.object(installer,'run') as run:
+            installer.ensure_packages(['curl','gnupg'])
+        self.assertEqual(run.call_args_list[1].args, ('apt-get','install','-y','--no-install-recommends','gnupg'))
 
     def test_completed_install_never_regenerates_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

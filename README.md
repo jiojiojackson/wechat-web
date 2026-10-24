@@ -7,28 +7,29 @@
 
 **安装入口：[jiojiojackson.github.io/wechat-web](https://jiojiojackson.github.io/wechat-web/)**
 
-## 一键部署
+## Docker Hub 镜像与一键部署
 
 使用一台独立的 **Ubuntu Server 22.04 / 24.04 / 26.04 LTS** 云主机，
 支持 **ARM64 / x86_64**。至少约 4 GiB 内存，推荐 2 核 / 8 GiB，
 默认 16 GiB 数据卷，加上构建、镜像和系统建议准备至少 40 GiB 可用磁盘。
 需要 root/sudo、systemd、正常公网出站和一个接入 Cloudflare 的域名。
 
-在服务器的 SSH 交互终端执行：
+成品镜像：[jiojiojackson/web-wechat](https://hub.docker.com/r/jiojiojackson/web-wechat)。
+支持 ARM64 / AMD64，公开拉取无需 Docker Hub 登录。Compose 模板见 [deploy/compose.yaml](deploy/compose.yaml)。
+
+在服务器的 SSH 交互终端执行（先自动补齐下载工具，再启动向导）：
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web/install.sh -o wechat-web-install.sh && bash wechat-web-install.sh
+bash -c 'set -e; wechat_sudo=(); if ((EUID)); then wechat_sudo=(sudo); fi; if ! command -v curl >/dev/null || ! test -s /etc/ssl/certs/ca-certificates.crt; then "${wechat_sudo[@]}" apt-get update -qq; "${wechat_sudo[@]}" apt-get install -y curl ca-certificates; fi; wechat_tmp=$(mktemp); wechat_cleanup(){ rm -f -- "$wechat_tmp"; }; trap wechat_cleanup EXIT; curl --proto "=https" --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web/install.sh -o "$wechat_tmp"; bash "$wechat_tmp"'
 ```
 
-这是下载并运行具有管理员权限的安装代码；可以先阅读 `wechat-web-install.sh`
-和本仓库的 [deploy/setup.py](deploy/setup.py)。如果缺少 curl：
-
-```bash
-sudo apt-get update && sudo apt-get install -y curl ca-certificates
-```
+这是下载并运行具有管理员权限的安装代码；可以先阅读 [install.sh](install.sh)
+和 [deploy/setup.py](deploy/setup.py)。缺少 Python、curl、证书、系统工具、Docker 或
+Compose 时自动安装。既有 Docker 的不兼容配置仍会停止，避免影响其他业务。
 
 安装器会依次引导你完成外部配置、填写域名/AUD/邮箱、自动识别团队并验证 Access、
-构建加固镜像、创建数据卷和服务。首次构建可能需要 10～30 分钟或更长。
+拉取已构建的镜像、创建数据卷并启动 Compose。目标服务器不进行镜像构建。
+向导逐步询问域名、邮箱、Tunnel 路由、Access/AUD 和数据卷大小；输入错误可原地重试。
 完成后显示访问网址、用户名 **`wechat`** 和独立生成的 **随机强密码**。
 在网页上先通过 Access，再输入本地账号密码，最后用手机微信扫码登录。
 
@@ -42,7 +43,7 @@ sudo bash deploy/install.sh
 
 ## 外部配置：域名、Tunnel、Access
 
-安装脚本会显示同样的步骤，你可以边配置边安装。不需要 Cloudflare API Token。
+安装脚本会逐项引导并等待输入，你可以边配置边安装。不需要 Cloudflare API Token。
 
 1. **域名**：在 Cloudflare DNS 托管自己的域名，选择专用子域名，例如
    `wechat.example.com`。通过 Tunnel 发布，无需添加指向服务器公网 IP 的 A 记录。
@@ -71,8 +72,8 @@ sudo bash deploy/install.sh
    安装前登录后出现 502 可以是源站尚未启动；匿名请求必须先被拦截。
    安装器会检查 `/`、`/files/`、`/websockets` 的拦截和团队公钥。
 
-脚本询问完整域名、AUD、允许登录的邮箱和数据卷大小；Tunnel/Access 配置完成后
-自动识别团队，并显示识别出的地址。只接受标准的 `https://<团队>.cloudflareaccess.com`
+脚本按步骤询问完整域名、允许登录的邮箱、AUD 和数据卷大小；Tunnel/Access 配置完成后
+自动识别团队，并显示识别出的地址。未通过检查时可重试或修改域名/AUD。只接受标准的 `https://<团队>.cloudflareaccess.com`
 Access 登录跳转，不跟随任意重定向。识别后仍需通过全部路径拦截和团队公钥检查；
 手动备用输入也不能跳过这些验证。团队地址保存到本机配置后，续装和日常检查不会自动更换它。
 **源站邮箱白名单与 Access 策略同时生效**：意外放宽云端策略也不能让不在名单内的邮箱进入应用。
@@ -112,7 +113,7 @@ Access 登录跳转，不跟随任意重定向。识别后仍需通过全部路�
 | 凭证保管 | 密码/签名密钥本机随机生成；root 私有目录，容器微信用户无法读取验证器秘密 |
 | 文件下载 | 文件目录鉴权、禁止符号链接逃逸、附件下载、nosniff 和禁止缓存 |
 | 更新与备份 | 启用 Ubuntu 自动安全更新但不自动重启；每日私有备份，7 天保留并限制累计 16 GiB |
-| 发布流程 | 固定上游镜像摘要和主要安全依赖版本；Pages 发布白名单源码；安装包 SHA256 校验、安全解包 |
+| 发布流程 | Actions 测试后构建并推送双架构 Docker Hub 镜像；Pages 安装包绑定镜像摘要；安装包 SHA256 校验、安全解包 |
 
 Docker 已存在时，脚本会检查版本和安全选项。**存在其他容器且未启用用户映射时会停止**，
 不会为安装微信而改变已有容器的 UID 映射或重启它们。推荐独立主机。
@@ -157,16 +158,20 @@ sudo docker logs --tail 100 wechat-web
 已经完成的安装会检查状态并保留配置，**重新运行安装器不是源码升级命令**。
 数据卷格式化中断、磁盘不足或目录归属不明确时会停止，要求管理员核对。
 
-维护镜像中系统包时，可在维护窗口使用安装时固定的源码重建：
+更新运行实例时，先做好备份，在维护窗口拉取经过 CI 测试的新镜像：
 
 ```bash
-sudo docker build --pull -t wechat-web:maintenance /opt/wechat-web/source/deploy
+sudo wechat-web backup
+sudo docker pull jiojiojackson/web-wechat:latest
+sudo docker image inspect jiojiojackson/web-wechat:latest --format '{{json .RepoDigests}}'
 sudo wechat-web stop
-sudo docker tag wechat-web:maintenance wechat-web:local
-# 将 /opt/wechat-web/.env 的 WECHAT_IMAGE 改为新镜像的 sha256 ID 后：
+# 将 /opt/wechat-web/.env 中 WECHAT_IMAGE 改为上述新仓库摘要（repo@sha256:...）后：
 sudo wechat-web start
 sudo wechat-web doctor
 ```
+
+Pages 安装包自带本次发布的 `deploy/release.json`，新安装会拉取其中固定的摘要。
+直接从 Git 安装则拉取已测试的 latest，再解析并固定仓库摘要；不会每次开机跟随 latest。
 
 主要 Python 依赖和上游摘要的更新需要审查源码、测试和重新扫描，
 不会未经审查自动跟随 `latest`。内核安全更新通常需要安排主机重启才生效。
@@ -195,6 +200,7 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -p test_access_guard.py -v
 .venv/bin/python -m unittest discover -s tests -p test_installer.py -v
 .venv/bin/python -m unittest discover -s tests -p test_bootstrap.py -v
+.venv/bin/python -m unittest discover -s tests -p test_terminal.py -v
 bash -n install.sh deploy/*.sh
 python3 scripts/check-public.py
 ```
@@ -204,8 +210,11 @@ python3 scripts/check-public.py
 不应连接已登录微信的生产视频流。安装器安全测试不会调用真实 apt/systemd 或格式化磁盘。
 
 仓库 Settings → Pages → Source 设为 **GitHub Actions**。
-推送 main 后，工作流先测试，再生成静态安装页面与带摘要的源码包，最后部署 Pages。
-流程不需要保存 Cloudflare 凭证或 GitHub PAT。Fork 时请修改 `install.sh` 中的 BASE_URL
+在仓库 Actions Secrets 配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`（仅 CI 使用）。
+推送 main 后，工作流运行安全/真实终端测试，分别在 AMD64、ARM64 原生 runner 构建并测试，
+推送到 Docker Hub，再合并发布 `latest` 和 `sha-<完整提交 SHA>` 双架构标签。
+最后才生成绑定该镜像摘要的 Pages 安装包并发布。PR 测试不会登录或推送 Docker Hub。
+流程不需要 Cloudflare 凭证或 GitHub PAT，目标服务器也不需要 Docker Hub Token。Fork 时请修改 `install.sh` 中的 BASE_URL
 以及 README/页面链接，并在自己的仓库启用 Pages。
 
 安装包只收录受 Git 跟踪的部署源码和指定文档；不打包工作目录、`.env`、secrets、

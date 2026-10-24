@@ -8,8 +8,8 @@ if [[ $RELEASE == *'@@'* ]]; then
     echo '源码安装请运行：sudo bash deploy/install.sh；本引导器需由 Pages 构建后使用。' >&2
     exit 1
 fi
-command -v python3 >/dev/null || { echo '需要 Python 3（Ubuntu Server 默认已安装）' >&2; exit 1; }
-command -v curl >/dev/null || { echo '请先执行 sudo apt-get update && sudo apt-get install -y curl ca-certificates' >&2; exit 1; }
+@@BOOTSTRAP@@
+bootstrap_dependencies
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
 chmod 0700 "$work_dir"

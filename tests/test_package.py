@@ -19,6 +19,7 @@ class PackageTests(unittest.TestCase):
             root = Path(directory)/'repo'
             root.mkdir()
             for name, data in {'deploy/setup.py': '# fixture', 'deploy/compose.yaml': '# fixture',
+                               'deploy/bootstrap.sh': '# fixture bootstrap',
                                'docs/index.html': '<title>fixture</title>',
                                'README.md': '# fixture',
                                'install.sh': 'release=@@RELEASE@@\nhash=@@BUNDLE_SHA256@@\n',
@@ -31,15 +32,16 @@ class PackageTests(unittest.TestCase):
             subprocess.run(['git', '-C', root, 'add', 'deploy', 'README.md', 'docs/index.html', 'install.sh'], check=True)
             first, second = Path(directory)/'first', Path(directory)/'second'
             with patch.object(publisher, 'ROOT', root):
-                publisher.build(first, 'a'*40)
-                publisher.build(second, 'a'*40)
+                publisher.build(first, 'a'*40, 'jiojiojackson/web-wechat@sha256:'+'b'*64)
+                publisher.build(second, 'a'*40, 'jiojiojackson/web-wechat@sha256:'+'b'*64)
             relative = Path('releases')/('a'*40)/'wechat-web.tar.gz'
             a, b = (first/relative).read_bytes(), (second/relative).read_bytes()
             self.assertEqual(a, b)
             self.assertEqual(a[4:8], b'\0'*4)
             with tarfile.open(first/relative) as archive:
                 self.assertEqual(set(archive.getnames()),
-                                 {'wechat-web/deploy/setup.py', 'wechat-web/deploy/compose.yaml', 'wechat-web/README.md'})
+                                 {'wechat-web/deploy/setup.py', 'wechat-web/deploy/compose.yaml', 'wechat-web/README.md',
+                                  'wechat-web/deploy/bootstrap.sh', 'wechat-web/deploy/release.json'})
             self.assertNotIn('@@RELEASE@@', (first/'install.sh').read_text())
             self.assertNotIn('@@BUNDLE_SHA256@@', (first/'install.sh').read_text())
 
