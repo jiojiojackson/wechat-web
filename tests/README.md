@@ -20,7 +20,7 @@ sudo python3 scripts/test-container.py --image wechat-web:local --webkit-image w
 
 SDK 中关闭 WebKit 内部 sandbox 仅用于受容器隔离、无网络的测试进程，
 **不是生产应用设置**。不要部署 SDK。测试覆盖中文组合输入、拖动工具栏、
-照片/文件分块传输、大小确认、手机视口/键盘/转屏，以及缺少 Safari 解码 API 时的真实 JPEG 绘制。
+照片/文件分块传输、大小确认、手机视口/键盘/转屏、电脑切回手机和后台恢复，以及缺少 Safari 解码 API 时的真实 JPEG 绘制。
 浏览器为模拟 iPhone 的 WebKit，不能替代每种物理设备的验证。
 
 `test_real_stream.py` 是高级维护工具，仅允许带有

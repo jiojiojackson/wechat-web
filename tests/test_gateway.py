@@ -115,13 +115,14 @@ try:
     assert b'compositionend' in script_body
     print('PASS: mobile IME fix loads before upstream module and remains authenticated',flush=True)
     for asset,mime in (('wechat-mobile-tools.js','javascript'),('wechat-mobile-tools.css','text/css'),('wechat-mobile-viewport.js','javascript'),('wechat-safari-codecs.js','javascript')):
-        version='2' if asset=='wechat-mobile-viewport.js' else '1'
+        version='3' if asset=='wechat-mobile-viewport.js' else '1'
         assert html.index(('/'+asset+'?v='+version).encode()) < html.index(b'<script type="module"')
         assert request('/'+asset,{})[0] == 403
         status,h,body=request('/'+asset)
         assert status==200 and mime in h.get('Content-Type','') and body
-    assert html.index(b'name="viewport"') < html.index(b'/wechat-mobile-viewport.js?v=2')
+    assert html.index(b'name="viewport"') < html.index(b'/wechat-mobile-viewport.js?v=3')
     assert b'/wechat-mobile-viewport.js?v=1' not in html
+    assert b'/wechat-mobile-viewport.js?v=2' not in html
     print('PASS: floating mobile controls load before upstream module and require identity',flush=True)
     async def check_websocket_routes():
         for path in ('/websockets', '/websocket'):

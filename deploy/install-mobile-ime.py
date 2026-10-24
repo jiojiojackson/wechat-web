@@ -9,7 +9,7 @@ for filename in ('mobile-ime.js', 'mobile-tools.js', 'mobile-tools.css', 'mobile
 index = root/'index.html'
 html = index.read_text()
 tags = ('<script src="/wechat-safari-codecs.js?v=1"></script>',
-        '<script src="/wechat-mobile-viewport.js?v=2"></script>',
+        '<script src="/wechat-mobile-viewport.js?v=3"></script>',
         '<script src="/wechat-mobile-ime.js?v=1"></script>',
         '<link rel="stylesheet" href="/wechat-mobile-tools.css?v=1">',
         '<script src="/wechat-mobile-tools.js?v=1"></script>')
@@ -19,6 +19,7 @@ if '<head>' not in html:
 # scripts still run before the deferred upstream module at this insertion point.
 updated = html
 updated = updated.replace('<script src="/wechat-mobile-viewport.js?v=1"></script>', '')
+updated = updated.replace('<script src="/wechat-mobile-viewport.js?v=2"></script>', '')
 for tag in tags:
     updated = updated.replace(tag, '')
 anchor = '<script type="module"'

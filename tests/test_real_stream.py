@@ -60,5 +60,37 @@ with sync_playwright() as p:
         assert page.evaluate(PIXELS)
         assert not any('VideoDecoder is closed' in message for message in logs)
         print('PASS: '+encoder+' real video survives reload on a static desktop',flush=True)
+        if not drop_first:
+            resize_count=sum(m.startswith('r,') for m in sent)
+            page.evaluate('''() => {window.fixtureHidden=true;
+                Object.defineProperty(document,'hidden',{get:()=>fixtureHidden,configurable:true});
+                document.dispatchEvent(new Event('visibilitychange'));}''')
+            page.wait_for_timeout(700)
+            page.evaluate("fixtureHidden=false;document.dispatchEvent(new Event('visibilitychange'))")
+            page.wait_for_function(PIXELS,timeout=18000)
+            page.wait_for_timeout(1000)
+            assert sum(m.startswith('r,') for m in sent)==resize_count+1,sent
+            assert not any('VideoDecoder is closed' in message for message in logs)
+            print('PASS: '+encoder+' background return restores remote size once and resumes actual video',flush=True)
+            # Disconnect the phone, use the actual same X desktop from a Retina
+            # computer, then return to the retained phone browser context.
+            page.goto('about:blank')
+            desktop=browser.new_context(viewport={'width':1366,'height':768},device_scale_factor=2)
+            computer=desktop.new_page();desktop_sent=[]
+            desktop.add_init_script("const pre=location.href.split('#')[0].replace(/[^a-zA-Z0-9.-_]/g,'_')+'_';localStorage.setItem(pre+'scaling_dpi','192');localStorage.setItem(pre+'useCssScaling','false');localStorage.setItem(pre+'encoder',"+json.dumps(encoder)+");")
+            computer.on('websocket',lambda ws:ws.on('framesent',lambda data:desktop_sent.append(data) if isinstance(data,str) else None))
+            computer.goto('http://127.0.0.1:3000/',wait_until='domcontentloaded')
+            computer.wait_for_function(PIXELS,timeout=18000)
+            settings=json.loads(next(m[9:] for m in desktop_sent if m.startswith('SETTINGS,')))
+            assert settings['scaling_dpi']==96 and settings['useCssScaling'],settings
+            assert settings['initialClientWidth']==1366 and settings['initialClientHeight']==768,settings
+            assert '96' in Path('/config/.Xresources').read_text()
+            desktop.close()
+            page.goto('http://127.0.0.1:3000/',wait_until='domcontentloaded')
+            page.wait_for_function(PIXELS,timeout=18000)
+            assert page.evaluate('document.getElementById("videoCanvas").width')==480
+            assert '96' in Path('/config/.Xresources').read_text()
+            assert not any('VideoDecoder is closed' in message for message in logs)
+            print('PASS: '+encoder+' Retina desktop-to-phone switch preserves 96 DPI and renders full phone stream',flush=True)
         context.close()
     browser.close()

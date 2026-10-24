@@ -4,8 +4,17 @@
     const phone = /iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent) ||
         (matchMedia("(pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 600);
     // Shared/secondary views do not control the primary desktop's resolution.
-    if (!phone || location.hash.startsWith("#shared") || location.hash.startsWith("#player") || location.hash.startsWith("#display2")) return;
+    if (location.hash.startsWith("#shared") || location.hash.startsWith("#player") || location.hash.startsWith("#display2")) return;
     const prefix = location.href.split("#")[0].replace(/[^a-zA-Z0-9.-_]/g, "_") + "_";
+    // A shared native application cannot reliably reflow between a Retina
+    // desktop's 192 DPI and a phone's 96 DPI. Use logical pixels on both;
+    // only the desktop resolution changes when the active device changes.
+    try {
+        for (const [name, value] of Object.entries({useCssScaling: true, use_css_scaling: true, scaling_dpi: 96})) {
+            localStorage.setItem(prefix + name, String(value));
+        }
+    } catch (_) { /* The server also locks these common display settings. */ }
+    if (!phone) return;
     const even = value => Math.ceil(value / 2) * 2;
     let base = {width: innerWidth, height: window.visualViewport?.height || innerHeight};
     let target;
@@ -13,6 +22,7 @@
     let timer;
     let connected = false;
     let firstFrameCheckScheduled = false;
+    let restorePending = false;
 
     function resolution() {
         // Keep all native WeChat dialogs within their published minimum window size.
@@ -45,13 +55,17 @@
     document.head.appendChild(css);
     const post = message => window.postMessage(message, location.origin);
     function applyResolution() {
-        if (!connected) return;
+        if (!connected || document.hidden) return;
         const signature = target.width + "x" + target.height;
-        if (signature === lastSent) return;
+        const canvas = document.getElementById("videoCanvas");
+        const changedByPeer = canvas && (canvas.width !== target.width || canvas.height !== target.height);
+        if (signature === lastSent && !changedByPeer && !restorePending) return;
         lastSent = signature;
+        restorePending = false;
         post({type: "setManualResolution", width: target.width, height: target.height});
     }
     function layout() {
+        if (document.hidden) return;
         const viewport = window.visualViewport;
         if (viewport && Math.abs(viewport.scale - 1) > 0.05) return;
         const width = innerWidth;
@@ -89,12 +103,26 @@
     window.visualViewport?.addEventListener("scroll", schedule);
     window.addEventListener("focusin", schedule);
     window.addEventListener("focusout", schedule);
+    // Returning to an existing Safari tab may not fire resize at all, even
+    // though another device has changed the single shared remote desktop.
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) restorePending = true;
+        else schedule();
+    });
+    window.addEventListener("pagehide", () => { restorePending = true; });
+    window.addEventListener("pageshow", event => {
+        if (event.persisted) restorePending = true;
+        schedule();
+    });
+    window.addEventListener("focus", schedule);
     window.addEventListener("message", event => {
         if (event.source !== window || event.origin !== location.origin) return;
+        if (event.data?.type === "serverSettings") schedule();
+        if (event.data?.type === "pipelineStatusUpdate" && event.data.video === false) connected = false;
         if (event.data?.type === "pipelineStatusUpdate" && event.data.video === true) {
             connected = true;
             // Runs after upstream finishes attaching its real coordinate mapper.
-            setTimeout(layout, 0);
+            schedule();
             if (!firstFrameCheckScheduled) {
                 firstFrameCheckScheduled = true;
                 setTimeout(() => {

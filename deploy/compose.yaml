@@ -45,6 +45,8 @@ services:
       SELKIES_FILE_TRANSFERS: upload,download
       SELKIES_ENABLE_BINARY_CLIPBOARD: "true"
       SELKIES_FRAMERATE: "30"
+      SELKIES_SCALING_DPI: "96"
+      SELKIES_USE_CSS_SCALING: "true|locked"
       FILE_MANAGER_PATH: /config/Desktop
       WECHAT_ACCESS_AUD: ${WECHAT_ACCESS_AUD:?Set Access application audience}
       WECHAT_ACCESS_TEAM: ${WECHAT_ACCESS_TEAM:?Set Cloudflare team name}
