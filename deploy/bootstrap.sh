@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 # Shared by the source entry point and the generated Pages downloader.
+bootstrap_authorize() {
+    if [[ $EUID -eq 0 ]]; then return 0; fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo '此安装需要管理员权限；当前账号没有 sudo，请改用 root 或具备 sudo 权限的账号。' >&2
+        return 1
+    fi
+    echo '正在确认 sudo 管理员权限；如有提示，请输入当前服务器账号的密码。'
+    if ! sudo -v; then
+        echo 'sudo 授权失败或已取消，安装已停止。请改用 root 或具备 sudo 权限的账号。' >&2
+        return 1
+    fi
+}
+
 bootstrap_root() {
     if [[ $EUID -eq 0 ]]; then
         "$@"

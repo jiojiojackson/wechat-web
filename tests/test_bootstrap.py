@@ -40,7 +40,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertTrue((bindir/'python3').exists())
             self.assertTrue((bindir/'curl').exists())
 
-    def exercise(self, extra=None, corrupt=False):
+    def exercise(self, extra=None, corrupt=False, sudo_mode='allowed', as_root=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root/'source.tar.gz'
@@ -64,37 +64,75 @@ class BootstrapTests(unittest.TestCase):
             script.write_text(template.replace('@@BUNDLE_SHA256@@', '0'*64 if corrupt else digest))
             bindir = root/'bin'
             bindir.mkdir()
+            for name in ('bash', 'chmod', 'mktemp', 'sha256sum', 'ip', 'env', 'rm', 'cp', 'python3'):
+                (bindir/name).symlink_to(shutil.which(name))
             curl = bindir/'curl'
-            curl.write_text('#!/bin/bash\nwhile (($#)); do if [[ $1 == -o ]]; then cp "$SOURCE_ARCHIVE" "$2"; exit; fi; shift; done\nexit 1\n')
+            curl.write_text('#!/bin/bash\nprintf downloaded > "$DOWNLOAD_RECORD"\nwhile (($#)); do if [[ $1 == -o ]]; then cp "$SOURCE_ARCHIVE" "$2"; exit; fi; shift; done\nexit 1\n')
             curl.chmod(0o700)
             sudo = bindir/'sudo'
-            sudo.write_text('#!/bin/sh\nexec "$@"\n')
+            sudo.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$SUDO_RECORD"\n'
+                            'if [[ $SUDO_MODE == denied ]]; then exit 1; fi\n'
+                            'if [[ $1 == -v ]]; then exit 0; fi\nexec "$@"\n')
             sudo.chmod(0o700)
-            env = dict(os.environ, PATH=str(bindir)+':'+os.environ['PATH'],
-                       SOURCE_ARCHIVE=str(archive), MARKER=str(root/'installed'))
-            result = subprocess.run(['bash', str(script)], env=env, capture_output=True, text=True)
-            return result.returncode, (root/'installed').exists(), result.stderr
+            if sudo_mode == 'missing':
+                sudo.unlink()
+            env = dict(os.environ, PATH=str(bindir), SOURCE_ARCHIVE=str(archive), MARKER=str(root/'installed'),
+                       SUDO_MODE=sudo_mode, SUDO_RECORD=str(root/'sudo.log'), DOWNLOAD_RECORD=str(root/'downloaded'))
+            options = {}
+            # Also exercise the ordinary-user path when this suite runs as
+            # root inside the isolated container. No real sudo policy is used.
+            if os.geteuid() == 0 and not as_root:
+                os.chown(root, 1000, 1000)
+                for path in root.rglob('*'):
+                    os.chown(path, 1000, 1000, follow_symlinks=False)
+                options = dict(user=1000, group=1000)
+            result = subprocess.run(['/bin/bash', str(script)], env=env, capture_output=True, text=True, **options)
+            return dict(code=result.returncode, installed=(root/'installed').exists(), error=result.stderr,
+                        downloaded=(root/'downloaded').exists(),
+                        sudo=(root/'sudo.log').read_text() if (root/'sudo.log').exists() else '')
 
     def test_valid_bundle_runs(self):
-        code, installed, error = self.exercise()
-        self.assertEqual(code, 0, error)
-        self.assertTrue(installed)
+        result = self.exercise()
+        self.assertEqual(result['code'], 0, result['error'])
+        self.assertTrue(result['installed'])
+        self.assertTrue(result['sudo'].startswith('-v\n'))
+
+    def test_missing_sudo_stops_before_any_download(self):
+        result = self.exercise(sudo_mode='missing')
+        self.assertNotEqual(result['code'], 0)
+        self.assertFalse(result['downloaded'])
+        self.assertFalse(result['installed'])
+        self.assertIn('管理员权限', result['error'])
+
+    def test_denied_or_cancelled_sudo_stops_before_any_download(self):
+        result = self.exercise(sudo_mode='denied')
+        self.assertNotEqual(result['code'], 0)
+        self.assertFalse(result['downloaded'])
+        self.assertFalse(result['installed'])
+        self.assertIn('sudo 授权失败', result['error'])
+
+    @unittest.skipUnless(os.geteuid() == 0, 'Root branch is exercised in the isolated container')
+    def test_root_entry_does_not_need_sudo(self):
+        result = self.exercise(sudo_mode='missing', as_root=True)
+        self.assertEqual(result['code'], 0, result['error'])
+        self.assertTrue(result['installed'])
+        self.assertEqual(result['sudo'], '')
 
     def test_digest_mismatch_stops_before_install(self):
-        code, installed, _ = self.exercise(corrupt=True)
-        self.assertNotEqual(code, 0)
-        self.assertFalse(installed)
+        result = self.exercise(corrupt=True)
+        self.assertNotEqual(result['code'], 0)
+        self.assertFalse(result['installed'])
 
     def test_traversal_stops_before_install(self):
         for name in ('../escape', '/tmp/escape', 'wechat-web/../../escape'):
-            code, installed, _ = self.exercise((name, 'file'))
-            self.assertNotEqual(code, 0)
-            self.assertFalse(installed)
+            result = self.exercise((name, 'file'))
+            self.assertNotEqual(result['code'], 0)
+            self.assertFalse(result['installed'])
 
     def test_symlink_stops_before_install(self):
-        code, installed, _ = self.exercise(('wechat-web/link', 'link'))
-        self.assertNotEqual(code, 0)
-        self.assertFalse(installed)
+        result = self.exercise(('wechat-web/link', 'link'))
+        self.assertNotEqual(result['code'], 0)
+        self.assertFalse(result['installed'])
 
 
 if __name__ == '__main__':

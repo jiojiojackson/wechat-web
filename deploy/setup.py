@@ -347,12 +347,21 @@ def ensure_packages(packages):
     if missing:
         print('自动安装缺失依赖：' + ', '.join(missing))
         run('apt-get', 'update', '-qq')
-        run('apt-get', 'install', '-y', '--no-install-recommends', *missing)
+        apt_install(*missing)
+
+
+def apt_install(*packages):
+    run('apt-get', 'install', '-y', '--no-install-recommends', *packages,
+        env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
 
 
 def docker_repository(info):
-    Path('/etc/apt/keyrings').mkdir(mode=0o755, parents=True, exist_ok=True)
-    key = '/etc/apt/keyrings/wechat-web-docker.asc'
+    directory = Path('/etc/apt/keyrings')
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    # main() uses umask 0077 for private runtime files. APT's unprivileged
+    # _apt downloader still needs to traverse this public signing-key directory.
+    directory.chmod(0o755)
+    key = directory / 'wechat-web-docker.asc'
     run('curl', '--proto', '=https', '--tlsv1.2', '-fsSL', '--retry', '3', '-o', key,
         'https://download.docker.com/linux/ubuntu/gpg')
     os.chmod(key, 0o644)
@@ -373,8 +382,8 @@ def dependencies(info):
     if not shutil.which('docker'):
         docker_repository(info)
         run('apt-get', 'update', '-qq')
-        run('apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io',
-            'docker-buildx-plugin', 'docker-compose-plugin')
+        apt_install('docker-ce', 'docker-ce-cli', 'containerd.io',
+                    'docker-buildx-plugin', 'docker-compose-plugin')
     elif subprocess.run(['docker', 'compose', 'version'], stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL).returncode:
         docker_repository(info)
@@ -424,7 +433,7 @@ def setup_tunnel():
         write('/etc/apt/sources.list.d/wechat-web-cloudflare.list',
               f'deb [signed-by={key}] https://pkg.cloudflare.com/cloudflared any main\n', 0o644)
         run('apt-get', 'update', '-qq')
-        run('apt-get', 'install', '-y', 'cloudflared')
+        apt_install('cloudflared')
     directory = Path('/etc/cloudflared-wechat-web')
     directory.mkdir(mode=0o700, exist_ok=True)
     write(directory / 'token', token + '\n')
@@ -519,8 +528,12 @@ def install_services():
         write(target, (SOURCE / filename).read_text(), 0o700)
     write('/usr/local/sbin/wechat-web', '#!/bin/sh\nexec /usr/bin/python3 /opt/wechat-web/source/deploy/setup.py "$@"\n', 0o700)
     run('systemctl', 'daemon-reload')
-    run('systemctl', 'enable', '--now', 'wechat-web-firewall.service')
-    run('systemctl', 'enable', '--now', 'wechat-web.service', 'wechat-web-backup.timer')
+    run('systemctl', 'enable', 'wechat-web-firewall.service', 'wechat-web.service', 'wechat-web-backup.timer')
+    # A previous interrupted install may already have active units. enable --now
+    # leaves those running with the old firewall or Compose configuration.
+    run('systemctl', 'restart', 'wechat-web-firewall.service')
+    run('systemctl', 'restart', 'wechat-web.service')
+    run('systemctl', 'start', 'wechat-web-backup.timer')
 
 
 def install():
@@ -606,7 +619,10 @@ def main():
     os.umask(0o077)
     Path('/run/lock').mkdir(exist_ok=True)
     with open('/run/lock/wechat-web-install.lock', 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail('另一个安装或管理进程正在运行，请等待其完成后重试。')
         if args.command == 'install':
             install()
         else:

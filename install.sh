@@ -9,6 +9,7 @@ if [[ $RELEASE == *'@@'* ]]; then
     exit 1
 fi
 @@BOOTSTRAP@@
+bootstrap_authorize
 bootstrap_dependencies
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
@@ -43,5 +44,5 @@ echo "已验证安装包：$RELEASE"
 if [[ $EUID -eq 0 ]]; then
     bash "$work_dir/wechat-web/deploy/install.sh"
 else
-    sudo bash "$work_dir/wechat-web/deploy/install.sh"
+    sudo bash -- "$work_dir/wechat-web/deploy/install.sh"
 fi

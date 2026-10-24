@@ -20,12 +20,16 @@
 在服务器的 SSH 交互终端执行（先自动补齐下载工具，再启动向导）：
 
 ```bash
-bash -c 'set -e; wechat_sudo=(); if ((EUID)); then wechat_sudo=(sudo); fi; if ! command -v curl >/dev/null || ! test -s /etc/ssl/certs/ca-certificates.crt; then "${wechat_sudo[@]}" apt-get update -qq; "${wechat_sudo[@]}" apt-get install -y curl ca-certificates; fi; wechat_tmp=$(mktemp); wechat_cleanup(){ rm -f -- "$wechat_tmp"; }; trap wechat_cleanup EXIT; curl --proto "=https" --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web/install.sh -o "$wechat_tmp"; bash "$wechat_tmp"'
+bash -c 'set -e; wechat_sudo=(); if ((EUID)); then command -v sudo >/dev/null || { echo "需要 root 或具备 sudo 权限的账号。" >&2; exit 1; }; sudo -v || { echo "sudo 授权失败，安装已停止。" >&2; exit 1; }; wechat_sudo=(sudo); fi; if ! command -v curl >/dev/null || ! test -s /etc/ssl/certs/ca-certificates.crt; then "${wechat_sudo[@]}" apt-get update -qq; "${wechat_sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates; fi; wechat_tmp=$(mktemp); wechat_cleanup(){ rm -f -- "$wechat_tmp"; }; trap wechat_cleanup EXIT; curl --proto "=https" --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web/install.sh -o "$wechat_tmp"; bash "$wechat_tmp"'
 ```
 
 这是下载并运行具有管理员权限的安装代码；可以先阅读 [install.sh](install.sh)
 和 [deploy/setup.py](deploy/setup.py)。缺少 Python、curl、证书、系统工具、Docker 或
 Compose 时自动安装。既有 Docker 的不兼容配置仍会停止，避免影响其他业务。
+
+普通账号会先验证 `sudo` 权限，可能提示输入当前服务器账号的密码；root 可直接运行，无需 sudo。
+缺少 sudo、没有授权或取消密码输入时，会在下载安装包之前停止并提示原因。
+安装器不会修改 sudoers、自动授予 root 权限，或要求把账号加入 Docker 用户组。
 
 安装器会依次引导你完成外部配置、填写域名/AUD/邮箱、自动识别团队并验证 Access、
 拉取已构建的镜像、创建数据卷并启动 Compose。目标服务器不进行镜像构建。

@@ -3,6 +3,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -143,6 +145,63 @@ class EdgeTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_non_root_python_entry_stops_before_any_host_changes(self):
+        with patch.object(installer.os, 'geteuid', return_value=1000), \
+             patch.object(sys, 'argv', ['setup.py', 'install']), \
+             patch.object(installer, 'install') as install, \
+             patch.object(installer, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'sudo'):
+                installer.main()
+        install.assert_not_called()
+        run.assert_not_called()
+
+    def test_apt_key_is_readable_despite_private_installer_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o755)
+            keys = root/'keyrings'
+            original_path = installer.Path
+            def fake_path(value):
+                return keys if str(value) == '/etc/apt/keyrings' else original_path(value)
+            def command(*args, **kwargs):
+                if args[0] == 'curl':
+                    Path(args[args.index('-o')+1]).write_text('public signing key\n')
+                if args[0] == 'gpg':
+                    return 'fpr:::::::::'+installer.DOCKER_KEY+':'
+                return 'arm64' if args[0] == 'dpkg' else ''
+            old_umask = os.umask(0o077)
+            try:
+                with patch.object(installer, 'Path', side_effect=fake_path), \
+                     patch.object(installer, 'run', side_effect=command), \
+                     patch.object(installer, 'write'):
+                    installer.docker_repository({'VERSION_CODENAME': 'noble'})
+            finally:
+                os.umask(old_umask)
+            key = keys/'wechat-web-docker.asc'
+            self.assertEqual(keys.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(key.stat().st_mode & 0o777, 0o644)
+            if os.geteuid() == 0:
+                result = subprocess.run(['/bin/cat', str(key)], user=65534, group=65534,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, 'public signing key\n')
+
+    def test_package_install_cannot_wait_for_debconf_input(self):
+        with patch.object(installer, 'run') as run:
+            installer.apt_install('docker-compose-plugin')
+        self.assertEqual(run.call_args.kwargs['env']['DEBIAN_FRONTEND'], 'noninteractive')
+        self.assertEqual(run.call_args.args, ('apt-get', 'install', '-y', '--no-install-recommends', 'docker-compose-plugin'))
+
+    def test_interrupted_install_restarts_units_to_apply_current_configuration(self):
+        with patch.object(installer, 'write'), patch.object(installer, 'run') as run:
+            installer.install_services()
+        commands = [call.args for call in run.call_args_list]
+        firewall = commands.index(('systemctl', 'restart', 'wechat-web-firewall.service'))
+        application = commands.index(('systemctl', 'restart', 'wechat-web.service'))
+        timer = commands.index(('systemctl', 'start', 'wechat-web-backup.timer'))
+        self.assertLess(firewall, application)
+        self.assertLess(application, timer)
+
     def test_secrets_generated_once_root_only_and_not_in_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
