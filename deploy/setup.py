@@ -573,10 +573,10 @@ def install():
 
 def doctor(config):
     verify_edge(config)
-    with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(
-            'http://127.0.0.1:13000/healthz', timeout=10) as response:
-        if response.status != 200:
-            fail('本机健康检查失败。')
+    # Docker translates host loopback connections to the bridge gateway.
+    # Keep healthz private to the container, rather than relaxing its ACL.
+    run('docker', 'exec', 'wechat-web', 'curl', '-fsS', '--max-time', '5',
+        'http://127.0.0.1:3000/healthz', capture=True)
     try:
         urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(
             'http://127.0.0.1:13000/', timeout=10)

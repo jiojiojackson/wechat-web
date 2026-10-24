@@ -235,6 +235,18 @@ class PersistenceTests(unittest.TestCase):
             installer.ensure_packages(['curl','gnupg'])
         self.assertEqual(run.call_args_list[1].args, ('apt-get','install','-y','--no-install-recommends','gnupg'))
 
+    def test_doctor_keeps_health_private_despite_docker_source_translation(self):
+        details = [{'State':{'Health':{'Status':'healthy'}},
+                    'HostConfig':{'PortBindings':{'3000/tcp':[{'HostIp':'127.0.0.1','HostPort':'13000'}]}}}]
+        opener = MagicMock()
+        opener.open.side_effect = urllib.error.HTTPError('http://127.0.0.1:13000/',403,'Forbidden',{},io.BytesIO())
+        with patch.object(installer,'verify_edge'), \
+             patch.object(installer.urllib.request,'build_opener',return_value=opener), \
+             patch.object(installer,'run',side_effect=['ok',json.dumps(details),'']) as run:
+            installer.doctor(CONFIG)
+        self.assertEqual(opener.open.call_count,1)
+        self.assertEqual(run.call_args_list[0].args[:3],('docker','exec','wechat-web'))
+
     def test_completed_install_never_regenerates_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)/'install-state.json'
