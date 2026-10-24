@@ -31,6 +31,8 @@ server = guard.Server(('127.0.0.1', 8090), guard.Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 websocket_ready = threading.Event()
 async def fixture_websocket(peer):
+    for name in ('Authorization', 'Cookie', 'Cf-Access-Jwt-Assertion'):
+        assert name not in peer.request.headers, f'Credential header leaked to desktop backend: {name}'
     await peer.send('MODE websockets')
     async for message in peer:
         await peer.send(message)

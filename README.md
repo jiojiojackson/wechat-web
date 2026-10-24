@@ -98,7 +98,7 @@ sudo bash deploy/install.sh
 | 独立身份验证 | 源站固定团队公钥，校验 RS256、issuer、AUD、时间、应用类型、身份和明确邮箱名单 |
 | 本地第二道验证 | 每次安装生成随机强密码，bcrypt 校验；首次密码登录后保留身份绑定会话 |
 | Cookie | `__Host-`、Secure、HttpOnly、SameSite=Lax、30 天上限；绑定 Access subject、域名与密码版本；不能代替 Access |
-| 请求边界 | 拒绝错误 Origin，关闭 devmode；限制验证并发与请求大小；公钥不可用时拒绝验证 |
+| 请求边界 | 拒绝错误 Origin，关闭 devmode；限制验证并发与请求大小；公钥不可用时拒绝验证；鉴权后不向桌面流服务转发 JWT、Cookie 或 Basic 密码头 |
 | 容器隔离 | Docker userns-remap、AppArmor、seccomp、no-new-privileges、移除默认 capabilities；微信进程使用 UID 1000 |
 | 宿主机隔离 | 没有特权、host 网络/PID、设备或 Docker socket；专用 bridge 阻止元数据、私网和宿主机管理访问 |
 | 启动顺序 | systemd 先检查隔离规则，再启动容器；由 systemd 重启应用，避免 Docker 自动启动早于隔离规则 |
