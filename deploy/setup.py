@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Interactive, fail-closed installer for a dedicated Ubuntu Docker host.
+
+Uses only the standard library. Runtime configuration is never written into
+the checkout. No Cloudflare account API key or GitHub credential is requested.
+"""
+import argparse
+import fcntl
+import getpass
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = Path('/opt/wechat-web')
+DATA = Path('/var/lib/wechat-web')
+SOURCE = Path(__file__).resolve().parent
+STATE = ROOT / 'install-state.json'
+DOCKER_KEY = '9DC858229FC7DD38854AE2D88D81803C0EBFCD88'
+CF_KEY_SHA256 = '1bd95f4082b320d541bee351560fc2765aa9f9cd8efa4c9e32135e63f252721d'
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def run(*args, capture=False, **kwargs):
+    # Arguments must never contain passwords, signing keys, or tunnel tokens.
+    result = subprocess.run([str(x) for x in args], check=True,
+                            stdout=subprocess.PIPE if capture else None,
+                            text=True, **kwargs)
+    return result.stdout.strip() if capture else ''
+
+
+def write(path, content, mode=0o600):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.new')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(content)
+    temporary.chmod(mode)
+    temporary.replace(path)
+
+
+def ask(prompt, default=None):
+    suffix = f' [{default}]' if default is not None else ''
+    with open('/dev/tty', 'r+') as tty:
+        tty.write(prompt + suffix + ': ')
+        tty.flush()
+        line = tty.readline()
+    if not line:
+        fail('未读取到终端输入。请在 SSH 交互终端中运行安装器。')
+    return line.strip() or default or ''
+
+
+def hostname(value):
+    value = value.strip().lower().rstrip('.')
+    if len(value) > 253 or '.' not in value:
+        fail('请输入完整域名，例如 wechat.example.com，不带 https:// 或路径。')
+    labels = value.split('.')
+    if not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x) for x in labels):
+        fail('域名格式无效；国际化域名请使用 Punycode。')
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        fail('需要域名，不能使用 IP 地址。')
+    return value
+
+
+def team_name(value):
+    value = value.strip().lower().removeprefix('https://').removesuffix('/')
+    value = value.removesuffix('.cloudflareaccess.com')
+    if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', value):
+        fail('团队名称无效，例如 my-team 或 https://my-team.cloudflareaccess.com。')
+    return value
+
+
+def audience(value):
+    if not re.fullmatch(r'[a-fA-F0-9]{64}', value.strip()):
+        fail('Application Audience (AUD) 应为 64 位十六进制应用标识；不要输入 Token。')
+    return value.strip().lower()
+
+
+def email_list(value):
+    values = sorted(set(x.strip().lower() for x in value.split(',') if x.strip()))
+    if not values or not all(re.fullmatch(r'[a-z0-9.!%+_=-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+', x) for x in values):
+        fail('请填写明确的邮箱，多个用英文逗号分隔，不能使用通配符。')
+    return ','.join(values)
+
+
+def validate_config(config):
+    return dict(config, domain=hostname(config['domain']), team=team_name(config['team']),
+                aud=audience(config['aud']), emails=email_list(config['emails']))
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
+def verify_edge(config):
+    """Unauthenticated probes must hit this team's Access gate before deploy."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    for path in ('/', '/files/', '/websockets'):
+        request = urllib.request.Request('https://' + config['domain'] + path,
+                                         headers={'User-Agent': 'wechat-web-preflight/1.0'})
+        try:
+            response = opener.open(request, timeout=20)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            target = urllib.parse.urlsplit(response.headers.get('Location', ''))
+            if (response.status not in (302, 303) or target.scheme != 'https'
+                    or target.hostname != config['team'] + '.cloudflareaccess.com'
+                    or not target.path.startswith('/cdn-cgi/access/login')):
+                fail(f'Access 拦截验证失败：{path} 返回 {response.status}。检查域名、团队、应用覆盖路径和 Bypass 策略。')
+    url = f"https://{config['team']}.cloudflareaccess.com/cdn-cgi/access/certs"
+    with opener.open(url, timeout=20) as response:
+        raw = response.read(262145)
+    if len(raw) > 262144:
+        fail('Access 公钥响应异常。')
+    keys = json.loads(raw).get('keys', [])
+    if not any(x.get('kty') == 'RSA' and x.get('alg') == 'RS256' for x in keys):
+        fail('没有取得有效的 Access RS256 公钥。')
+
+
+def platform_check():
+    info = {}
+    for line in Path('/etc/os-release').read_text().splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            info[key] = value.strip('"')
+    if info.get('ID') != 'ubuntu' or info.get('VERSION_ID') not in ('22.04', '24.04', '26.04'):
+        fail('目前支持 Ubuntu Server 22.04 / 24.04 / 26.04 LTS，使用 systemd。')
+    if os.uname().machine not in ('aarch64', 'x86_64') or not Path('/run/systemd/system').is_dir():
+        fail('需要 ARM64 或 x86_64 的 systemd 云主机；不支持容器内安装。')
+    memory = int(re.search(r'MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text())[1]) * 1024
+    if memory < 3800 * 1024**2:
+        fail('至少需要约 4 GiB 内存，推荐 8 GiB 和 2 核以上。')
+    return info, memory
+
+
+def preflight():
+    # Check all conflicts before creating runtime directories or changing Docker.
+    if ROOT.exists() and not STATE.exists():
+        fail('/opt/wechat-web 已存在且无安装状态，拒绝覆盖。')
+    if DATA.exists() and not STATE.exists():
+        fail('/var/lib/wechat-web 已存在且无安装状态，拒绝覆盖。')
+    with socket.socket() as probe:
+        try:
+            probe.bind(('127.0.0.1', 13000))
+        except OSError:
+            fail('本机 13000 端口已被占用，未更改现有应用。请使用一台独立服务器。')
+    daemon = Path('/etc/docker/daemon.json')
+    config = json.loads(daemon.read_text()) if daemon.exists() else {}
+    if config.get('userns-remap') not in (None, 'default'):
+        fail('已有自定义 Docker 用户映射；请使用独立服务器，安装器不会覆盖。')
+    if config.get('firewall-backend', 'iptables') != 'iptables' or config.get('iptables') is False:
+        fail('需要 Docker iptables 防火墙后端；不会覆盖现有网络配置。')
+    if shutil.which('docker'):
+        if subprocess.run(['docker', 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            fail('已有 Docker 无法使用，请先检查 daemon；安装器不会重置。')
+        version = run('docker', 'version', '--format', '{{.Server.Version}}', capture=True)
+        if int(version.split('.')[0]) < 28:
+            fail('需要 Docker 28+ 修复本机端口隔离问题，请先维护升级。')
+        containers = run('docker', 'ps', '-aq', capture=True)
+        if containers and config.get('userns-remap') != 'default':
+            fail('已有容器但未启用 userns-remap；拒绝自动重启或改变其他容器。请换独立服务器。')
+        if run('docker', 'network', 'ls', '--filter', 'name=^wechat-web-net$', '-q', capture=True):
+            fail('同名 Docker 网络已存在，请先核对，安装器不会删除。')
+    for service in ('docker.io', 'podman-docker', 'containerd', 'runc'):
+        status = subprocess.run(['dpkg-query', '-W', '-f=${db:Status-Status}', service],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if status.stdout == 'installed':
+            fail(f'检测到冲突包 {service}，请先维护或使用干净的 Ubuntu 主机。')
+    if shutil.which('ip'):
+        for route in json.loads(run('ip', '-j', 'route', capture=True)):
+            net = route.get('dst', 'default')
+            if net != 'default' and ipaddress.ip_network(net).overlaps(ipaddress.ip_network('172.30.81.0/24')):
+                fail('172.30.81.0/24 与已有路由重叠，请使用独立服务器或手动调整安装器配置。')
+
+
+def dependencies(info):
+    run('apt-get', 'update', '-qq')
+    run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl',
+        'gnupg', 'iptables', 'e2fsprogs', 'util-linux', 'apparmor', 'unattended-upgrades')
+    run('systemctl', 'enable', '--now', 'apparmor')
+    if not Path('/sys/module/apparmor/parameters/enabled').exists() or Path('/sys/module/apparmor/parameters/enabled').read_text().strip() != 'Y':
+        fail('内核未启用 AppArmor，停止部署。请先启用并重启主机。')
+    if not shutil.which('docker'):
+        Path('/etc/apt/keyrings').mkdir(mode=0o755, parents=True, exist_ok=True)
+        key = '/etc/apt/keyrings/wechat-web-docker.asc'
+        run('curl', '--proto', '=https', '--tlsv1.2', '-fsSL', '--retry', '3', '-o', key,
+            'https://download.docker.com/linux/ubuntu/gpg')
+        os.chmod(key, 0o644)
+        details = run('gpg', '--batch', '--with-colons', '--show-keys', key, capture=True)
+        if DOCKER_KEY not in [line.split(':')[9] for line in details.splitlines() if line.startswith('fpr:')]:
+            fail('Docker 官方签名密钥指纹不匹配。')
+        arch = run('dpkg', '--print-architecture', capture=True)
+        write('/etc/apt/sources.list.d/wechat-web-docker.list',
+              f'deb [arch={arch} signed-by={key}] https://download.docker.com/linux/ubuntu {info["VERSION_CODENAME"]} stable\n', 0o644)
+        run('apt-get', 'update', '-qq')
+        run('apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io',
+            'docker-buildx-plugin', 'docker-compose-plugin')
+    daemon = Path('/etc/docker/daemon.json')
+    config = json.loads(daemon.read_text()) if daemon.exists() else {}
+    changed = config.get('userns-remap') != 'default'
+    if changed:
+        config.update({'userns-remap': 'default', 'live-restore': True, 'log-driver': 'local',
+                       'log-opts': {'max-size': '10m', 'max-file': '3'}})
+        write(daemon, json.dumps(config, indent=2) + '\n')
+        run('systemctl', 'restart', 'docker')
+    run('systemctl', 'enable', '--now', 'docker')
+    run('docker', 'compose', 'version')
+    security = run('docker', 'info', '--format', '{{json .SecurityOptions}}', capture=True)
+    if not all(x in security for x in ('userns', 'seccomp', 'apparmor')):
+        fail('Docker 必须具备 userns、seccomp 和 AppArmor 支持。')
+    run('systemctl', 'enable', '--now', 'apt-daily.timer', 'apt-daily-upgrade.timer')
+    write('/etc/apt/apt.conf.d/52wechat-web-security',
+          'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n'
+          'Unattended-Upgrade::Automatic-Reboot "false";\n', 0o644)
+
+
+def setup_tunnel():
+    active = subprocess.run(['systemctl', 'is-active', '--quiet', 'cloudflared']).returncode == 0
+    active = active or subprocess.run(['systemctl', 'is-active', '--quiet', 'cloudflared-wechat-web']).returncode == 0
+    if active:
+        print('检测到现有 Cloudflare Tunnel 服务，将复用，不更改其配置。')
+        return
+    if ask('未检测到活动的 Tunnel。由安装器安装连接器？输入 INSTALL，或先手动启动后重试') != 'INSTALL':
+        fail('请先建立 Tunnel；没有更改应用配置。')
+    token = getpass.getpass('粘贴该 Tunnel 的连接器 Token（隐藏输入，不是 Cloudflare API Token）: ')
+    if not re.fullmatch(r'[A-Za-z0-9_+/=-]{80,4096}', token):
+        fail('Tunnel Token 格式无效。只粘贴 Token，不要粘贴整条安装命令。')
+    # Never put the connector token in argv, environment, journald, or Git.
+    if not shutil.which('cloudflared'):
+        key = Path('/usr/share/keyrings/wechat-web-cloudflare.gpg')
+        run('curl', '--proto', '=https', '--tlsv1.2', '-fsSL', '--retry', '3', '-o', key,
+            'https://pkg.cloudflare.com/cloudflare-main.gpg')
+        if hashlib.sha256(key.read_bytes()).hexdigest() != CF_KEY_SHA256:
+            fail('Cloudflare 包签名密钥发生变化，请先由维护者核验并更新。')
+        key.chmod(0o644)
+        write('/etc/apt/sources.list.d/wechat-web-cloudflare.list',
+              f'deb [signed-by={key}] https://pkg.cloudflare.com/cloudflared any main\n', 0o644)
+        run('apt-get', 'update', '-qq')
+        run('apt-get', 'install', '-y', 'cloudflared')
+    directory = Path('/etc/cloudflared-wechat-web')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    write(directory / 'token', token + '\n')
+    del token
+    binary = shutil.which('cloudflared')
+    write('/etc/systemd/system/cloudflared-wechat-web.service',
+          '[Unit]\nDescription=Cloudflare Tunnel for WeChat Web\nAfter=network-online.target\nWants=network-online.target\n'
+          '[Service]\nType=simple\n'
+          f'ExecStart={binary} --no-autoupdate tunnel run --token-file {directory}/token\n'
+          'Restart=on-failure\nRestartSec=5s\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n'
+          'ProtectSystem=strict\nProtectHome=true\nProtectKernelTunables=true\nProtectControlGroups=true\n'
+          '[Install]\nWantedBy=multi-user.target\n', 0o644)
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'cloudflared-wechat-web')
+    print('连接器已启动。请确认 Cloudflare 中 Tunnel 显示 Healthy。')
+
+
+def subid(path):
+    entries = [line.split(':') for line in Path(path).read_text().splitlines() if line.startswith('dockremap:')]
+    if len(entries) != 1 or int(entries[0][2]) < 65536:
+        fail('无法确认 dockremap 的连续 65536 UID/GID 映射，停止创建数据卷。')
+    return int(entries[0][1])
+
+
+def create_volume(config):
+    image = DATA / 'data.ext4'
+    target = DATA / 'config'
+    DATA.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target.mkdir(mode=0o700, exist_ok=True)
+    if not image.exists():
+        needed = config['storage_gib'] * 1024**3
+        if shutil.disk_usage(DATA).free < needed + 10 * 1024**3:
+            fail('数据卷之外需要至少 10 GiB 剩余空间用于构建；请释放磁盘后重试。')
+        run('fallocate', '-l', str(needed), image)
+        image.chmod(0o600)
+        run('mkfs.ext4', '-q', '-F', image)
+        config['volume_formatted'] = True
+        write(STATE, json.dumps(config, indent=2) + '\n')
+    elif not config.get('volume_formatted'):
+        fail('数据镜像存在但无格式化完成标记；请人工核对，安装器不会重新格式化。')
+    unit = run('systemd-escape', '--path', '--suffix=mount', target, capture=True)
+    write(Path('/etc/systemd/system') / unit,
+          '[Unit]\nDescription=Bounded private WeChat Web data volume\nBefore=wechat-web.service\n'
+          f'[Mount]\nWhat={image}\nWhere={target}\nType=ext4\nOptions=loop,nosuid,nodev,noatime\n'
+          '[Install]\nWantedBy=multi-user.target\n', 0o644)
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', unit)
+    uid, gid = subid('/etc/subuid'), subid('/etc/subgid')
+    os.chown(DATA, uid + 1000, gid + 1000)
+    os.chown(target, uid + 1000, gid + 1000)
+    config.update(uid_base=uid, gid_base=gid)
+    return uid, gid
+
+
+def create_secrets(uid, gid):
+    directory = ROOT / 'secrets'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    password = directory / 'web-password'
+    session = directory / 'session-key'
+    if not password.exists():
+        write(password, secrets.token_urlsafe(24) + '\n', 0o400)
+    if not session.exists():
+        write(session, secrets.token_hex(32) + '\n', 0o400)
+    for path in (password, session):
+        os.chown(path, uid, gid)
+        path.chmod(0o400)
+    write(ROOT / 'credentials.txt', '用户名: wechat\n密码: ' + password.read_text().strip() + '\n')
+
+
+def install_services():
+    for name in ('wechat-web.service', 'wechat-web-firewall.service', 'wechat-web-backup.service', 'wechat-web-backup.timer'):
+        write(Path('/etc/systemd/system') / name, (SOURCE / name).read_text(), 0o644)
+    for filename, target in (('harden-firewall.sh', '/usr/local/sbin/wechat-web-firewall'),
+                             ('backup-wechat.sh', '/usr/local/sbin/wechat-web-backup')):
+        write(target, (SOURCE / filename).read_text(), 0o700)
+    write('/usr/local/sbin/wechat-web', '#!/bin/sh\nexec /usr/bin/python3 /opt/wechat-web/source/deploy/setup.py "$@"\n', 0o700)
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'wechat-web-firewall.service')
+    run('systemctl', 'enable', '--now', 'wechat-web.service', 'wechat-web-backup.timer')
+
+
+def install():
+    info, memory = platform_check()
+    if STATE.exists():
+        config = validate_config(json.loads(STATE.read_text()))
+        if config.get('complete'):
+            print('检测到已完成的安装；保留数据、密码和运行配置。')
+            doctor(config)
+            print('查看用户名和密码：sudo wechat-web credentials')
+            return
+        print('继续尚未完成的安装；保留原域名、密码和数据。')
+    else:
+        preflight()
+        print((SOURCE.parent / 'docs/install-guide.txt').read_text())
+        config = validate_config(dict(domain=ask('已配置的微信完整域名'),
+                                      team=ask('Zero Trust 团队名称 / 团队地址'),
+                                      aud=ask('微信 Access 应用的 Application Audience (AUD)'),
+                                      emails=ask('允许登录的完整邮箱（多个用英文逗号分隔）')))
+        storage = ask('为微信数据分配多少 GiB（固定上限，预分配）', '16')
+        if not storage.isdigit() or not 4 <= int(storage) <= 256:
+            fail('存储大小应为 4～256 的整数。')
+        config.update(storage_gib=int(storage), memory=f'{min(6, max(2, int(memory/1024**3)-2))}g',
+                      cpus=min(3, max(1, (os.cpu_count() or 2)-1)), complete=False)
+        print('即将安装至 /opt/wechat-web；数据 /var/lib/wechat-web；入口仅 127.0.0.1:13000。')
+        if ask('确认仅用于独立主机，Access 已按上述邮箱配置且无 Bypass，并允许安装依赖？输入 DEPLOY') != 'DEPLOY':
+            fail('已取消，未修改应用或 Docker。')
+    # Tunnel can be installed/reused before the edge check. Never start the app
+    # until an unauthenticated request is blocked by the selected Access team.
+    run('apt-get', 'update', '-qq')
+    run('apt-get', 'install', '-y', '--no-install-recommends', 'ca-certificates', 'curl', 'gnupg')
+    setup_tunnel()
+    ask('确认域名/Tunnel/Access 已配置完成后按回车，开始验证')
+    verify_edge(config)
+    if not STATE.exists():
+        ROOT.mkdir(mode=0o700)
+        write(STATE, json.dumps(config, indent=2) + '\n')
+    ROOT.chmod(0o700)
+    # The source copy contains templates, never credentials or host state.
+    installed = ROOT / 'source' / 'deploy'
+    if SOURCE != installed:
+        for directory in ('deploy', 'docs'):
+            shutil.copytree(SOURCE.parent / directory, ROOT / 'source' / directory,
+                            dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    dependencies(info)
+    uid, gid = create_volume(config)
+    create_secrets(uid, gid)
+    image_tag = 'wechat-web:local'
+    run('docker', 'build', '--pull', '-t', image_tag, SOURCE)
+    image_id = run('docker', 'image', 'inspect', image_tag, '--format', '{{.Id}}', capture=True)
+    config['image'] = image_id
+    env = dict(WECHAT_IMAGE=image_id, WECHAT_DOMAIN=config['domain'], WECHAT_ACCESS_TEAM=config['team'],
+               WECHAT_ACCESS_AUD=config['aud'], WECHAT_ALLOWED_EMAILS=config['emails'],
+               WECHAT_MEMORY=config['memory'], WECHAT_CPUS=str(config['cpus']))
+    write(ROOT / '.env', ''.join(f'{k}={v}\n' for k, v in env.items()))
+    write(ROOT / 'compose.yaml', (SOURCE / 'compose.yaml').read_text())
+    write(STATE, json.dumps(config, indent=2) + '\n')
+    install_services()
+    doctor(config)
+    config['complete'] = True
+    write(STATE, json.dumps(config, indent=2) + '\n')
+    print(f'\n部署完成：https://{config["domain"]}\n先完成 Access 登录，再输入以下本地账号：')
+    print((ROOT / 'credentials.txt').read_text())
+    print('凭证仅保存在本机 /opt/wechat-web/credentials.txt（root 0600）；请勿提交至 Git。')
+
+
+def doctor(config):
+    verify_edge(config)
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(
+            'http://127.0.0.1:13000/healthz', timeout=10) as response:
+        if response.status != 200:
+            fail('本机健康检查失败。')
+    try:
+        urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(
+            'http://127.0.0.1:13000/', timeout=10)
+    except urllib.error.HTTPError as error:
+        if error.code != 403:
+            raise
+    else:
+        fail('源站未登录访问未被拒绝。')
+    details = json.loads(run('docker', 'inspect', 'wechat-web', capture=True))[0]
+    if details['State'].get('Health', {}).get('Status') != 'healthy':
+        fail('容器尚未 healthy，请检查 sudo journalctl -u wechat-web。')
+    ports = details['HostConfig']['PortBindings']
+    if ports != {'3000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '13000'}]}:
+        fail('容器端口绑定不符合仅本机访问要求。')
+    run('/usr/local/sbin/wechat-web-firewall', '--check')
+    print('验证通过：Access 拦截、源站拒绝匿名访问、容器健康、回环端口及隔离规则。')
+    print('邮箱策略/AUD 的最终确认需要首次实际登录；安装器不会索取用户的 Access JWT。')
+
+
+def main():
+    parser = argparse.ArgumentParser(description='微信 Web 安装与管理（只在本机保存配置/凭证）')
+    parser.add_argument('command', nargs='?', default='install',
+                        choices=['install', 'doctor', 'credentials', 'reset-password', 'backup', 'start', 'stop'])
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        fail('请使用 sudo bash deploy/install.sh，或 sudo wechat-web <命令>。')
+    os.umask(0o077)
+    Path('/run/lock').mkdir(exist_ok=True)
+    with open('/run/lock/wechat-web-install.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if args.command == 'install':
+            install()
+        else:
+            config = validate_config(json.loads(STATE.read_text()))
+            if args.command == 'doctor':
+                doctor(config)
+            elif args.command == 'credentials':
+                print((ROOT / 'credentials.txt').read_text())
+            elif args.command == 'reset-password':
+                # Cutting established connections is part of revocation.
+                run('systemctl', 'stop', 'wechat-web')
+                write(ROOT / 'secrets/web-password', secrets.token_urlsafe(24) + '\n', 0o400)
+                write(ROOT / 'secrets/session-key', secrets.token_hex(32) + '\n', 0o400)
+                create_secrets(config['uid_base'], config['gid_base'])
+                run('systemctl', 'start', 'wechat-web')
+                print((ROOT / 'credentials.txt').read_text())
+            elif args.command == 'backup':
+                run('systemctl', 'start', 'wechat-web-backup')
+            else:
+                run('systemctl', args.command, 'wechat-web')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f'\n安装/检查已停止：{error}', file=sys.stderr)
+        print('未完成的安装可重新运行；不会自动删除数据、重新格式化已有卷或生成新密码。', file=sys.stderr)
+        sys.exit(1)

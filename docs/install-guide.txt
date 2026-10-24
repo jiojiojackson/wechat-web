@@ -1,0 +1,38 @@
+微信 Web：域名 / Tunnel / Access 准备向导
+
+先在浏览器完成以下操作，再回到本终端填写。可以边配置边安装。
+
+1. 域名：把自己的域名接入 Cloudflare DNS，选一个专用子域名，
+   例如 wechat.example.com。无需给服务器公网 IP 添加 A 记录。
+
+2. Tunnel：Cloudflare One / Zero Trust → Networks → Connectors →
+   Cloudflare Tunnels，创建或复用一个 cloudflared Tunnel。
+   必须有连接器运行在本服务器；复用现有 SSH Tunnel 时，只添加路由，
+   不要替换连接器 Token 或 SSH 路由。新连接器可由本安装器隐藏读取 Token。
+
+3. Published application routes（旧界面 Public Hostnames）：
+   Hostname = wechat.example.com
+   Service Type = HTTP
+   URL = localhost:13000
+   端口只在本机回环监听；无需在 Oracle / 云防火墙新增入站端口。
+   使用 localhost，避免 Protect with Access 的 IPv6/回环地址差异。
+
+4. Access → Applications → Add an application → Self-hosted：
+   添加同一个完整域名，覆盖全部路径，不要只保护 /。
+   添加 Allow 策略：Include → Emails → 仅填写自己的指定邮箱。
+   不使用 Everyone、整个邮箱后缀、Bypass 或公共分享策略。
+   设置合适的 Access Session duration（例如 24 小时），启用适用的 MFA。
+
+5. 复制 Application Audience (AUD) Tag（通常在 Additional settings）。
+   在团队设置中找到团队地址 https://my-team.cloudflareaccess.com。
+   回到第 3 步，在该路由的 Additional application settings → Access 中
+   启用 Protect with Access，选择同一个团队/应用；界面名称可能变化。
+   源站也会独立校验 JWT 签名、issuer、AUD 和邮箱，拒绝缺失或错误身份。
+
+6. 无痕窗口打开域名，应先显示 Cloudflare Access 登录。应用还未启动时，
+   登录后的 502 属于准备阶段现象；匿名请求必须先被 Access 拦截。
+
+本机仅收集：应用域名、团队名称、AUD、明确的邮箱名单和数据卷大小。
+域名/AUD 不是认证密码。无需提供 Cloudflare API Token 或 GitHub 密钥。
+新连接器使用的 Tunnel Token 为敏感凭证，隐藏输入，仅保存在 root 私有文件。
+安装器不会关闭现有公网 SSH；若要关闭，请先验证 SSH Tunnel 并在云控制台操作。

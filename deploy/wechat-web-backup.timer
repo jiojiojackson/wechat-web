@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily private WeChat Web data backup
+
+[Timer]
+OnCalendar=*-*-* 19:30:00 UTC
+RandomizedDelaySec=5m
+Persistent=true
+Unit=wechat-web-backup.service
+
+[Install]
+WantedBy=timers.target

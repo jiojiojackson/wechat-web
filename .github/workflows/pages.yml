@@ -1,0 +1,77 @@
+name: Test and publish installer
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Public source and shell validation
+        run: |
+          python3 scripts/check-public.py
+          for script in install.sh deploy/*.sh; do bash -n "$script"; done
+          shellcheck install.sh deploy/*.sh
+      - name: Authentication and installer safety tests
+        run: |
+          python3 -m venv /tmp/wechat-web-tests
+          /tmp/wechat-web-tests/bin/pip install -r tests/requirements.txt
+          /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_access_guard.py -v
+          /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_installer.py -v
+          /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_bootstrap.py -v
+  containers:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build hardened native image
+        run: docker build --pull -t wechat-web:ci deploy
+      - name: Run isolated authentication and gateway tests
+        run: python3 scripts/test-container.py --image wechat-web:ci
+  build:
+    if: github.event_name != 'pull_request'
+    needs: [test, containers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - run: python3 scripts/build-pages.py _site
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: _site
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

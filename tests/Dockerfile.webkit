@@ -1,0 +1,8 @@
+# Test SDK only. Never deploy this image as the application.
+ARG APP_IMAGE=wechat-web:local
+FROM ${APP_IMAGE}
+USER root
+RUN /lsiopy/bin/pip install --no-cache-dir playwright==1.63.0 \
+ && /lsiopy/bin/python3 -m playwright install --with-deps webkit
+ENV WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+ENTRYPOINT ["/lsiopy/bin/python3"]

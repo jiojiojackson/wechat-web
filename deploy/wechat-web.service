@@ -1,0 +1,24 @@
+[Unit]
+Description=Hardened WeChat Web
+Requires=docker.service wechat-web-firewall.service
+After=docker.service wechat-web-firewall.service network-online.target
+Wants=network-online.target
+BindsTo=docker.service
+PartOf=docker.service
+RequiresMountsFor=/var/lib/wechat-web/config
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wechat-web
+ExecStartPre=/usr/local/sbin/wechat-web-firewall --check
+ExecStart=/usr/bin/docker compose up --no-build --abort-on-container-exit --exit-code-from wechat
+ExecStartPost=/bin/bash /opt/wechat-web/source/deploy/wait-ready.sh
+ExecStop=/usr/bin/docker compose stop -t 30
+Restart=always
+RestartSec=10
+TimeoutStartSec=360
+TimeoutStopSec=90
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target docker.service

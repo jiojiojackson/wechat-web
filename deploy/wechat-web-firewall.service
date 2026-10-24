@@ -1,0 +1,14 @@
+[Unit]
+Description=WeChat Web bridge isolation
+Requires=docker.service
+After=docker.service
+Before=wechat-web.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wechat-web-firewall
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target docker.service

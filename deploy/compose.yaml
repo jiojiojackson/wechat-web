@@ -1,0 +1,103 @@
+name: wechat-web
+services:
+  wechat:
+    image: ${WECHAT_IMAGE:?Run the verified image build first}
+    pull_policy: never
+    container_name: wechat-web
+    hostname: wechat
+    restart: "no"
+    ports:
+      - "127.0.0.1:13000:3000"
+    volumes:
+      - /var/lib/wechat-web/config:/config
+      - /opt/wechat-web/secrets/web-password:/run/secrets/web-password:ro
+      - /opt/wechat-web/secrets/session-key:/run/secrets/session-key:ro
+    networks:
+      - wechat
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${WECHAT_TZ:-Asia/Shanghai}
+      LC_ALL: zh_CN.UTF-8
+      UMASK: "077"
+      TITLE: 微信
+      AUTO_START_WECHAT: "true"
+      AUTO_START_QQ: "false"
+      ENABLE_WECHAT_AUTO_LOGIN: "false"
+      ENABLE_WECHAT_NIGHTLY_RESTART: "false"
+      START_DOCKER: "false"
+      DISABLE_SUDO: "true"
+      DISABLE_TERMINALS: "true"
+      DISABLE_IPV6: "true"
+      NO_GAMEPAD: "true"
+      PIXELFLUX_WAYLAND: "false"
+      SELKIES_COMMAND_ENABLED: "false|locked"
+      SELKIES_UI_SIDEBAR_SHOW_APPS: "false|locked"
+      SELKIES_UI_SIDEBAR_SHOW_SHARING: "false|locked"
+      SELKIES_UI_SIDEBAR_SHOW_GAMEPADS: "false|locked"
+      SELKIES_ENABLE_SHARING: "false|locked"
+      SELKIES_ENABLE_COLLAB: "false|locked"
+      SELKIES_ENABLE_SHARED: "false|locked"
+      SELKIES_GAMEPAD_ENABLED: "false|locked"
+      SELKIES_FILE_TRANSFERS: upload,download
+      SELKIES_ENABLE_BINARY_CLIPBOARD: "true"
+      SELKIES_FRAMERATE: "30"
+      FILE_MANAGER_PATH: /config/Desktop
+      WECHAT_ACCESS_AUD: ${WECHAT_ACCESS_AUD:?Set Access application audience}
+      WECHAT_ACCESS_TEAM: ${WECHAT_ACCESS_TEAM:?Set Cloudflare team name}
+      WECHAT_DOMAIN: ${WECHAT_DOMAIN:?Set application hostname}
+      WECHAT_ALLOWED_EMAILS: ${WECHAT_ALLOWED_EMAILS:?Set explicit email allowlist}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 1gb
+    mem_limit: ${WECHAT_MEMORY:-6g}
+    memswap_limit: ${WECHAT_MEMORY:-6g}
+    cpus: ${WECHAT_CPUS:-3}
+    pids_limit: 512
+    ulimits:
+      core: 0
+      nofile:
+        soft: 4096
+        hard: 8192
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m,mode=1777
+      - /run:rw,exec,nosuid,nodev,size=64m
+      - /var/tmp:rw,nosuid,nodev,size=64m,mode=1777
+      - /defaults:rw,exec,nosuid,nodev,size=64m,mode=0700
+      - /app:rw,nosuid,nodev,size=64m,mode=0755
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS --max-time 3 http://127.0.0.1:3000/healthz >/dev/null && pgrep -x wechat >/dev/null && test $(curl -s --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/verify) = 403"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+networks:
+  wechat:
+    name: wechat-web-net
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-wxweb
+      com.docker.network.bridge.enable_icc: "false"
+      com.docker.network.bridge.host_binding_ipv4: 127.0.0.1
+    ipam:
+      config:
+        - subnet: ${WECHAT_SUBNET:-172.30.81.0/24}

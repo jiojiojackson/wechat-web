@@ -1,0 +1,26 @@
+# Runtime secrets and chat data are outside this checkout by design.
+.env
+.env.*
+!.env.example
+secrets/
+credentials*
+*token*
+*.pem
+*.key
+*.p12
+*.pfx
+*.ext4
+*.tar
+*.tar.gz
+*.zip
+config/
+data/
+backups/
+audit/
+install-state.json
+__pycache__/
+*.py[cod]
+.venv/
+_site/
+test-results/
+.DS_Store

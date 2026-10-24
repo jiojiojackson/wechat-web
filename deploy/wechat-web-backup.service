@@ -1,0 +1,14 @@
+[Unit]
+Description=Back up private WeChat Web data
+After=wechat-web.service
+Requires=docker.service
+RequiresMountsFor=/var/lib/wechat-web/config
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wechat-web-backup
+ExecStopPost=-/usr/local/sbin/wechat-web-backup --resume
+TimeoutStartSec=180
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
