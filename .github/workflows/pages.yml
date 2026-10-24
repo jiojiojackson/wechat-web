@@ -32,6 +32,7 @@ jobs:
           /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_bootstrap.py -v
           /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_package.py -v
           /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_terminal.py -v
+          /tmp/wechat-web-tests/bin/python -m unittest discover -s tests -p test_wait_ready.py -v
   containers:
     needs: test
     strategy:
