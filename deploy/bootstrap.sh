@@ -6,8 +6,11 @@ bootstrap_authorize() {
         echo '此安装需要管理员权限；当前账号没有 sudo，请改用 root 或具备 sudo 权限的账号。' >&2
         return 1
     fi
+    # sudo -v may still demand a password with mixed PASSWD/NOPASSWD rules.
+    # Probe the same root shell needed by the installer, using NOPASSWD first.
+    if sudo -n bash -c '((EUID == 0))' >/dev/null 2>&1; then return 0; fi
     echo '正在确认 sudo 管理员权限；如有提示，请输入当前服务器账号的密码。'
-    if ! sudo -v; then
+    if ! sudo bash -c '((EUID == 0))'; then
         echo 'sudo 授权失败或已取消，安装已停止。请改用 root 或具备 sudo 权限的账号。' >&2
         return 1
     fi

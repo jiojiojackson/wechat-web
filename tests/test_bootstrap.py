@@ -72,7 +72,10 @@ class BootstrapTests(unittest.TestCase):
             sudo = bindir/'sudo'
             sudo.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$SUDO_RECORD"\n'
                             'if [[ $SUDO_MODE == denied ]]; then exit 1; fi\n'
-                            'if [[ $1 == -v ]]; then exit 0; fi\nexec "$@"\n')
+                            'if [[ $1 == -v ]]; then exit 1; fi\n'
+                            'if [[ $1 == -n ]]; then shift; [[ $SUDO_MODE == password ]] && exit 1; fi\n'
+                            'if [[ $1 == bash && $2 == -c && $3 == "((EUID == 0))" ]]; then exit 0; fi\n'
+                            'exec "$@"\n')
             sudo.chmod(0o700)
             if sudo_mode == 'missing':
                 sudo.unlink()
@@ -95,7 +98,14 @@ class BootstrapTests(unittest.TestCase):
         result = self.exercise()
         self.assertEqual(result['code'], 0, result['error'])
         self.assertTrue(result['installed'])
-        self.assertTrue(result['sudo'].startswith('-v\n'))
+        self.assertTrue(result['sudo'].startswith('-n bash -c ((EUID == 0))\n'))
+        self.assertNotIn('-v', result['sudo'])
+
+    def test_password_required_policy_uses_interactive_authorization(self):
+        result = self.exercise(sudo_mode='password')
+        self.assertEqual(result['code'], 0, result['error'])
+        self.assertTrue(result['installed'])
+        self.assertIn('-n bash -c ((EUID == 0))\nbash -c ((EUID == 0))\n', result['sudo'])
 
     def test_missing_sudo_stops_before_any_download(self):
         result = self.exercise(sudo_mode='missing')

@@ -20,7 +20,7 @@
 在服务器的 SSH 交互终端执行（先自动补齐下载工具，再启动向导）：
 
 ```bash
-bash -c 'set -e; wechat_sudo=(); if ((EUID)); then command -v sudo >/dev/null || { echo "需要 root 或具备 sudo 权限的账号。" >&2; exit 1; }; sudo -v || { echo "sudo 授权失败，安装已停止。" >&2; exit 1; }; wechat_sudo=(sudo); fi; if ! command -v curl >/dev/null || ! test -s /etc/ssl/certs/ca-certificates.crt; then "${wechat_sudo[@]}" apt-get update -qq; "${wechat_sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates; fi; wechat_tmp=$(mktemp); wechat_cleanup(){ rm -f -- "$wechat_tmp"; }; trap wechat_cleanup EXIT; curl --proto "=https" --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web/install.sh -o "$wechat_tmp"; bash "$wechat_tmp"'
+bash -c 'set -e; wechat_sudo=(); if ((EUID)); then command -v sudo >/dev/null || { echo "需要 root 或具备 sudo 权限的账号。" >&2; exit 1; }; sudo -n bash -c "((EUID == 0))" 2>/dev/null || sudo bash -c "((EUID == 0))" || { echo "sudo 授权失败，安装已停止。" >&2; exit 1; }; wechat_sudo=(sudo); fi; if ! command -v curl >/dev/null || ! test -s /etc/ssl/certs/ca-certificates.crt; then "${wechat_sudo[@]}" apt-get update -qq; "${wechat_sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates; fi; wechat_tmp=$(mktemp); wechat_cleanup(){ rm -f -- "$wechat_tmp"; }; trap wechat_cleanup EXIT; curl --proto "=https" --tlsv1.2 -fsSL https://jiojiojackson.github.io/wechat-web/install.sh -o "$wechat_tmp"; bash "$wechat_tmp"'
 ```
 
 这是下载并运行具有管理员权限的安装代码；可以先阅读 [install.sh](install.sh)
