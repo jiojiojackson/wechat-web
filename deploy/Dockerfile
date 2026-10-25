@@ -16,6 +16,7 @@ COPY mobile-ime.js /opt/wechat-hardening/mobile-ime.js
 COPY mobile-tools.js mobile-tools.css /opt/wechat-hardening/
 COPY mobile-viewport.js /opt/wechat-hardening/
 COPY safari-codecs.js /opt/wechat-hardening/
+COPY window-fit.py /opt/wechat-hardening/
 COPY install-mobile-ime.py /opt/wechat-hardening/install-mobile-ime.py
 COPY nginx.conf /opt/wechat-hardening/nginx.conf
 COPY init-hardening.sh /custom-cont-init.d/99-wechat-hardening
@@ -27,7 +28,12 @@ RUN mkdir -p /etc/s6-overlay/s6-rc.d/svc-wechat-access/dependencies.d \
  && printf '%s\n' '#!/usr/bin/with-contenv bash' 'exec s6-setuidgid nobody /lsiopy/bin/python3 /usr/local/lib/wechat-access-guard.py' > /etc/s6-overlay/s6-rc.d/svc-wechat-access/run \
  && touch /etc/s6-overlay/s6-rc.d/svc-wechat-access/dependencies.d/init-services \
           /etc/s6-overlay/s6-rc.d/user/contents.d/svc-wechat-access \
- && chmod 0755 /etc/s6-overlay/s6-rc.d/svc-wechat-access/run /custom-cont-init.d/99-wechat-hardening /scripts/start.sh /usr/local/bin/wechat-entrypoint \
+ && mkdir -p /etc/s6-overlay/s6-rc.d/svc-wechat-windows/dependencies.d \
+ && printf '%s\n' longrun > /etc/s6-overlay/s6-rc.d/svc-wechat-windows/type \
+ && printf '%s\n' '#!/usr/bin/with-contenv bash' 'exec s6-setuidgid abc /lsiopy/bin/python3 /opt/wechat-hardening/window-fit.py' > /etc/s6-overlay/s6-rc.d/svc-wechat-windows/run \
+ && touch /etc/s6-overlay/s6-rc.d/svc-wechat-windows/dependencies.d/init-services \
+          /etc/s6-overlay/s6-rc.d/user/contents.d/svc-wechat-windows \
+ && chmod 0755 /etc/s6-overlay/s6-rc.d/svc-wechat-windows/run /etc/s6-overlay/s6-rc.d/svc-wechat-access/run /custom-cont-init.d/99-wechat-hardening /scripts/start.sh /usr/local/bin/wechat-entrypoint \
  && chmod 0644 /usr/local/lib/wechat-access-guard.py /opt/wechat-hardening/nginx.conf /defaults/menu.xml \
  && cp -a /defaults /opt/wechat-hardening/defaults \
  && find /usr /bin /sbin /opt -xdev -type f -perm /6000 -exec chmod a-s '{}' +

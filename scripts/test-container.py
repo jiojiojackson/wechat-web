@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--frontend-only', action='store_true')
     args = parser.parse_args()
     if not args.frontend_only:
+        run_python(args.image, (ROOT/'tests/test_window_fit.py').read_text())
         run_python(args.image, (ROOT/'tests/test_access_guard.py').read_text().replace(
             'from pathlib import Path\nguard_path =',
             'from pathlib import Path\nos.environ["WECHAT_GUARD_PATH"] = "/usr/local/lib/wechat-access-guard.py"\nguard_path ='))

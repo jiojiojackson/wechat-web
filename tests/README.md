@@ -8,6 +8,7 @@ sudo python3 scripts/test-container.py --image wechat-web:local
 ```
 
 这会创建一次性 `--network none` 容器，仅使用临时密码和密钥，测试：
+真实 Xvfb/Openbox 下首次二维码窗口、电脑切回手机、转屏和手动拖动，
 RS256/AUD/issuer/邮箱名单，Cookie/密码，Nginx/WebSocket 双向握手，
 文件鉴权、符号链接、目录逃逸。不会读取或挂载真实微信配置。
 
