@@ -19,6 +19,7 @@ class PackageTests(unittest.TestCase):
             root = Path(directory)/'repo'
             root.mkdir()
             for name, data in {'deploy/setup.py': '# fixture', 'deploy/compose.yaml': '# fixture',
+                               'deploy/uninstall.py': '# fixture uninstall',
                                'deploy/bootstrap.sh': '# fixture bootstrap',
                                'docs/index.html': '<title>fixture</title>',
                                'README.md': '# fixture',
@@ -41,7 +42,8 @@ class PackageTests(unittest.TestCase):
             with tarfile.open(first/relative) as archive:
                 self.assertEqual(set(archive.getnames()),
                                  {'wechat-web/deploy/setup.py', 'wechat-web/deploy/compose.yaml', 'wechat-web/README.md',
-                                  'wechat-web/deploy/bootstrap.sh', 'wechat-web/deploy/release.json'})
+                                  'wechat-web/deploy/bootstrap.sh', 'wechat-web/deploy/release.json',
+                                  'wechat-web/deploy/uninstall.py'})
             self.assertNotIn('@@RELEASE@@', (first/'install.sh').read_text())
             self.assertNotIn('@@BUNDLE_SHA256@@', (first/'install.sh').read_text())
 

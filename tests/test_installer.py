@@ -145,6 +145,20 @@ class EdgeTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_uninstall_cli_does_not_require_valid_install_state_or_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root/'install-state.json'
+            state.write_text('broken state')
+            with patch.object(installer, 'STATE', state), \
+                 patch.object(installer, 'INSTALL_LOCK', root/'install.lock'), \
+                 patch.object(installer.os, 'geteuid', return_value=0), \
+                 patch.object(sys, 'argv', ['setup.py', 'uninstall', '--yes']), \
+                 patch.object(installer, 'uninstall_application') as uninstall, \
+                 patch.object(installer, 'verify_edge', side_effect=AssertionError('No Access check during removal')):
+                installer.main()
+            uninstall.assert_called_once_with(True)
+
     def test_non_root_python_entry_stops_before_any_host_changes(self):
         with patch.object(installer.os, 'geteuid', return_value=1000), \
              patch.object(sys, 'argv', ['setup.py', 'install']), \

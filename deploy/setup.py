@@ -5,6 +5,7 @@ Uses only the standard library. Runtime configuration is never written into
 the checkout. No Cloudflare account API key or GitHub credential is requested.
 """
 import argparse
+import importlib.util
 import fcntl
 import getpass
 import warnings
@@ -28,6 +29,7 @@ ROOT = Path('/opt/wechat-web')
 DATA = Path('/var/lib/wechat-web')
 SOURCE = Path(__file__).resolve().parent
 STATE = ROOT / 'install-state.json'
+INSTALL_LOCK = Path('/run/lock/wechat-web-install.lock')
 DOCKER_KEY = '9DC858229FC7DD38854AE2D88D81803C0EBFCD88'
 CF_KEY_SHA256 = '1bd95f4082b320d541bee351560fc2765aa9f9cd8efa4c9e32135e63f252721d'
 IMAGE_REPOSITORY = 'jiojiojackson/web-wechat'
@@ -609,21 +611,34 @@ def doctor(config):
     print('邮箱策略/AUD 的最终确认需要首次实际登录；安装器不会索取用户的 Access JWT。')
 
 
+def uninstall_application(yes=False):
+    spec = importlib.util.spec_from_file_location('wechat_web_uninstall', SOURCE/'uninstall.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.uninstall(assume_yes=yes, ask=ask)
+
+
 def main():
     parser = argparse.ArgumentParser(description='微信 Web 安装与管理（只在本机保存配置/凭证）')
     parser.add_argument('command', nargs='?', default='install',
-                        choices=['install', 'doctor', 'credentials', 'reset-password', 'backup', 'start', 'stop'])
+                        choices=['install', 'doctor', 'credentials', 'reset-password', 'backup', 'start', 'stop', 'uninstall'])
+    parser.add_argument('--yes', action='store_true', help='uninstall 时跳过交互确认，永久删除应用数据')
     args = parser.parse_args()
+    if args.yes and args.command != 'uninstall':
+        parser.error('--yes 仅适用于 uninstall')
     if os.geteuid() != 0:
         fail('请使用 sudo bash deploy/install.sh，或 sudo wechat-web <命令>。')
     os.umask(0o077)
-    Path('/run/lock').mkdir(exist_ok=True)
-    with open('/run/lock/wechat-web-install.lock', 'w') as lock:
+    INSTALL_LOCK.parent.mkdir(exist_ok=True)
+    with open(INSTALL_LOCK, 'w') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             fail('另一个安装或管理进程正在运行，请等待其完成后重试。')
-        if args.command == 'install':
+        if args.command == 'uninstall':
+            # Removal must work with missing/corrupt state or expired Access.
+            uninstall_application(args.yes)
+        elif args.command == 'install':
             install()
         else:
             config = validate_config(json.loads(STATE.read_text()))
@@ -650,5 +665,8 @@ if __name__ == '__main__':
         main()
     except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f'\n安装/检查已停止：{error}', file=sys.stderr)
-        print('未完成的安装可重新运行；不会自动删除数据、重新格式化已有卷或生成新密码。', file=sys.stderr)
+        if 'uninstall' in sys.argv[1:]:
+            print('卸载未完成，请查看错误后重试。Tunnel 与共享系统依赖不会被删除。', file=sys.stderr)
+        else:
+            print('未完成的安装可重新运行；不会自动删除数据、重新格式化已有卷或生成新密码。', file=sys.stderr)
         sys.exit(1)

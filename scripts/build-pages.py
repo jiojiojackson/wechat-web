@@ -27,7 +27,7 @@ def build(output, revision, image=None):
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     names = [name for name in tracked if name and name != 'deploy/release.json' and (name.startswith('deploy/') or
              name in ('docs/install-guide.txt', 'docs/upstream-LICENSE', 'README.md', 'LICENSE', 'NOTICE.md', 'SECURITY.md'))]
-    if 'deploy/setup.py' not in names or 'deploy/compose.yaml' not in names:
+    if not {'deploy/setup.py', 'deploy/compose.yaml', 'deploy/uninstall.py'}.issubset(names):
         raise ValueError('Required source files missing from Git index')
     # A rerun for the same commit must keep the same bytes and digest, including
     # the gzip header. Cached bootstrap scripts then remain usable.

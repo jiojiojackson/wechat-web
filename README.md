@@ -144,9 +144,18 @@ sudo wechat-web reset-password   # 断开连接，轮换密码和会话密钥，
 sudo wechat-web backup           # 手动执行一次备份
 sudo wechat-web stop
 sudo wechat-web start
+sudo wechat-web uninstall        # 永久删除应用、数据和备份；保留 Tunnel 与外部配置
 sudo journalctl -u wechat-web -n 100 --no-pager
 sudo docker logs --tail 100 wechat-web
 ```
+
+卸载时输入 `uninstall` 确认，**不会自动备份，聊天记录、上传文件和登录凭证均会删除**。
+脚本会清理专用容器、网络、防火墙链、服务、定时任务、数据卷、备份和管理命令，
+以及未被其他容器使用的本项目 Docker Hub 镜像引用；不会执行全局 Docker prune。
+Cloudflare Tunnel（包括本安装器创建的连接器及 Token）、DNS、Access 应用、Docker 和系统依赖/软件源保持不变。
+无需交互时可用 `sudo wechat-web uninstall --yes`。卸载完成后该管理命令也会被删除。
+若应用配置已损坏，也可在源码目录运行 `sudo bash deploy/install.sh uninstall`，无需提供域名或通过 Access 登录。
+旧版管理命令若尚无 `uninstall`，请获取最新源码后使用上述源码命令；这会直接卸载，不会重新安装应用。
 
 | 本机位置 | 内容 |
 | --- | --- |
